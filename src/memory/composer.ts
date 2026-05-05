@@ -6,13 +6,17 @@
 //        `## Leads ativos do contato (atendimento ambíguo)` quando há 2+
 //        leads OPEN para o mesmo contato.
 //
-// Compõe o pacote final que vai para o LLM:
+// Compõe o pacote final que vai para o LLM. Ordem das seções no system foi
+// invertida em 2026-05-05 para mitigar "L1 dominante vs prompt": estado
+// dinâmico (Contato + Lead/Leads ambíguos) fica por ÚLTIMO no system, ficando
+// adjacente ao L1 que vem nas messages — assim o LLM "lê" o estado logo antes
+// do histórico em vez de no meio dele.
 //   - `system`        : agent_configs.systemPrompt
-//                       + `## Contato` (sempre)
+//                       + `## Sumário do contato` (L2 — se houver)
+//                       + `## Contexto temporal` (sempre)
+//                       + `## Contato` (sempre que tiver nome)
 //                       + `## Estado do lead atual` (1 lead) OU
 //                         `## Leads ativos do contato (atendimento ambíguo)` (2+)
-//                       + `## Sumário do contato` (L2 — se houver)
-//                       + `## Contexto temporal`
 //   - `messages`      : L1 (lastN(15)) + a mensagem inbound deste turno
 //   - `tokenEstimate` : aproximação grosseira (chars / 4) — útil para tracing
 //
@@ -61,9 +65,16 @@ export async function compose(ctx: HarnessContext): Promise<ComposedPrompt> {
     buildSummary(ctx.contact.id),
   ]);
 
-  // Monta system: base + Contato + (lead snapshot OU candidatos ambíguos)
-  // + L2 (se houver) + contexto temporal (sempre).
+  // Monta system: base + L2 (se houver) + contexto temporal + Contato +
+  // (lead snapshot OU candidatos ambíguos). Estado dinâmico vai POR ÚLTIMO
+  // para ficar adjacente ao L1 (mais "recente" para o LLM). Ver comentário
+  // do header sobre L1 dominante.
   const sections: string[] = [baseSystem];
+
+  if (l2.length > 0) {
+    sections.push('## Sumário do contato', l2);
+  }
+  sections.push('## Contexto temporal', `Agora: ${formatNowBR()}`);
 
   const contactSection = renderContact(ctx.contact);
   if (contactSection.length > 0) {
@@ -85,11 +96,6 @@ export async function compose(ctx: HarnessContext): Promise<ComposedPrompt> {
       sections.push('## Estado do lead atual', leadSection);
     }
   }
-
-  if (l2.length > 0) {
-    sections.push('## Sumário do contato', l2);
-  }
-  sections.push('## Contexto temporal', `Agora: ${formatNowBR()}`);
   // Junta com double newline entre seções (e single dentro de uma seção quando
   // o título e corpo já são strings separadas).
   const system = sections
@@ -190,6 +196,8 @@ function renderLeadCandidates(
   candidates: NonNullable<HarnessContext['leadCandidates']>,
 ): string {
   const lines: string[] = [
+    '**SOBRESCREVE QUALQUER INFERÊNCIA DO HISTÓRICO.** Mesmo que o histórico de mensagens sugira fortemente um evento específico, IGNORE essa inferência e PERGUNTE ao cliente para desambiguar antes de qualquer ação.',
+    '',
     'Existem múltiplos eventos abertos para este contato:',
   ];
   for (const c of candidates) {
@@ -232,31 +240,37 @@ function renderLeadCandidates(
 function renderLeadSnapshot(lead: HarnessContext['lead']): string {
   if (!lead) return '';
 
-  const lines: string[] = [];
+  const fields: string[] = [];
   if (lead.classification) {
-    lines.push(`Classificação: ${lead.classification}`);
+    fields.push(`Classificação: ${lead.classification}`);
   }
   if (lead.eventType) {
-    lines.push(`Tipo de evento: ${lead.eventType}`);
+    fields.push(`Tipo de evento: ${lead.eventType}`);
   }
   if (lead.eventDate) {
-    lines.push(`Data do evento: ${lead.eventDate}`);
+    fields.push(`Data do evento: ${lead.eventDate}`);
   }
   if (lead.guestCount !== null && lead.guestCount !== undefined) {
-    lines.push(`Convidados: ${lead.guestCount}`);
+    fields.push(`Convidados: ${lead.guestCount}`);
   }
   if (lead.estimatedBudget) {
-    lines.push(`Orçamento estimado: R$ ${lead.estimatedBudget}`);
+    fields.push(`Orçamento estimado: R$ ${lead.estimatedBudget}`);
   }
   if (lead.preferences) {
-    lines.push(`Preferências: ${lead.preferences}`);
+    fields.push(`Preferências: ${lead.preferences}`);
   }
   if (lead.notes) {
-    lines.push(`Anotações: ${lead.notes}`);
+    fields.push(`Anotações: ${lead.notes}`);
   }
   if (lead.visitScheduledAt) {
-    lines.push(`Visita agendada: ${lead.visitScheduledAt}`);
+    fields.push(`Visita agendada: ${lead.visitScheduledAt}`);
   }
 
-  return lines.join('\n');
+  if (fields.length === 0) return '';
+
+  return [
+    '**Os campos abaixo são a fonte da verdade do lead atual. Se o histórico de mensagens sugerir algo diferente, prevalece esta seção.**',
+    '',
+    ...fields,
+  ].join('\n');
 }
