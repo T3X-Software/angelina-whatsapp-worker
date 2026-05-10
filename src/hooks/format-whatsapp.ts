@@ -31,7 +31,19 @@
 //   6. Restaura placeholders: bold vira `*texto*`, lista vira `• `, URLs
 //      voltam ao original.
 
+// Bloco 2 (feature whatsapp-message-splitting-and-handoff-continuity, task #9):
+// após formatar, o hook aplica `splitMessage` sobre o resultado e popula
+// `ctx.messages: string[]`. Quando length>1, o pipeline runner em `loop.ts`
+// itera BEFORE_SEND N vezes (1 por parte) com delay configurável entre cada
+// send. Quando length<=1, comportamento legacy preservado (single send via
+// `lastModelText`).
+
 import type { Hook, HookResult, HarnessContext } from '../harness/types';
+import type { HandoffContinuityHookParams } from '../config/types';
+import {
+  splitMessage,
+  DEFAULT_MESSAGE_SPLIT_CONFIG,
+} from '../utils/split-message';
 
 // Sentinelas — chars de controle que nunca aparecem em texto WhatsApp normal.
 const SENT_OPEN = '';
@@ -110,12 +122,40 @@ export const formatWhatsapp: Hook = {
     const after = formatWhatsappText(before);
     ctx.lastModelText = after;
 
+    // Bloco 2 — splitter. Lê config de `agent_configs.hook_params.message_split`
+    // (cache 30s via findActiveByKey). Fallback para defaults se ausente.
+    const params = (ctx.config?.hookParams ?? {}) as HandoffContinuityHookParams;
+    const splitConfig = params.message_split ?? DEFAULT_MESSAGE_SPLIT_CONFIG;
+    const parts = splitMessage(after, splitConfig);
+    ctx.messages = parts;
+
     ctx.eventBus.emitHook(
       'format-whatsapp',
       'AFTER_MODEL',
-      { before_len: before.length, after_len: after.length },
+      {
+        before_len: before.length,
+        after_len: after.length,
+        parts: parts.length,
+        soft_limit: splitConfig.soft_limit,
+        hard_limit: splitConfig.hard_limit,
+        max_parts: splitConfig.max_parts,
+      },
       'info',
     );
+
+    // Trace dedicado quando houve split (>1 parte) — útil para auditar quanto
+    // o splitter está sendo acionado em prod.
+    if (parts.length > 1) {
+      ctx.eventBus.emit(
+        'message_split',
+        {
+          parts: parts.length,
+          part_lens: parts.map((p) => p.length),
+          original_len: after.length,
+        },
+        'info',
+      );
+    }
 
     return {};
   },

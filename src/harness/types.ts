@@ -283,6 +283,37 @@ export interface HarnessContext {
   lastModelText?: string;
 
   /**
+   * Bloco 2 — feature `whatsapp-message-splitting-and-handoff-continuity`.
+   *
+   * Output do splitter no `format-whatsapp` (AFTER_MODEL). Quando ausente ou
+   * length=1, o pipeline runner mantém comportamento legacy (1 send via
+   * `lastModelText`). Quando length>1, o runner itera BEFORE_SEND N vezes,
+   * uma por parte, com delay configurável (`message_split.interval_ms`)
+   * entre cada send.
+   *
+   * Cada parte é validada pelo `response-guard` (incluindo guard de
+   * `turn.id` corrente — Bloco 2 task #11) antes do send.
+   */
+  messages?: string[];
+
+  /**
+   * Bloco 2 — índice da parte corrente quando o pipeline runner está iterando
+   * sobre `messages[]`. Setado pelo loop antes de cada iteração de BEFORE_SEND.
+   * Usado pelo `human-delay` (typing indicator) e pelo `response-guard` (logs).
+   * `partTotal` espelha `messages.length` na iteração.
+   */
+  partIndex?: number;
+  partTotal?: number;
+
+  /**
+   * Bloco 2 — texto da parte corrente sendo enviada. Quando `messages.length>1`,
+   * o pipeline runner copia `messages[partIndex]` para cá antes de cada
+   * BEFORE_SEND. `responseToSend` continua sendo o texto unificado para
+   * persistência inicial em `messages` (única row outbound, registro do turno).
+   */
+  currentMessage?: string;
+
+  /**
    * Resposta a enviar no fim do pipeline. Caminhos:
    *   - happy path: igual a `lastModelText` (após format-whatsapp).
    *   - short-circuit em BEFORE_REQUEST com `response`: setado pelo loop antes

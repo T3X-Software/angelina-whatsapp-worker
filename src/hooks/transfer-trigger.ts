@@ -13,16 +13,22 @@
 //     que `format-whatsapp` e `human-delay` + `response-guard` NÃO rodem.
 //
 // Sequência (5 passos — concept hot-handoff, ordem OBRIGATÓRIA):
-//   1. UPDATE leads SET is_human_active=true WHERE id=$1
+//   1. UPDATE leads SET is_human_active=true, interest_summary=$2,
+//      suggested_action=$3 WHERE id=$1
+//      (Bloco 3: 2 campos novos populados a partir dos args opcionais
+//       passados pelo Claude na tool `transfer_to_human`)
 //   2. ZapsterClient.send(transferMessage)            ← bypassa response-guard
 //   3. INSERT INTO tasks ('Lead HOT — atendimento', FOLLOWUP, HIGH, PENDING)
-//   4. ZapsterClient.send(messageJuliano)             ← support_whatsapp
+//   4. ZapsterClient.send(supportMessage)             ← support_whatsapp
+//      (Bloco 3: usa template em `agent_configs.hook_params.handoff_support_message_template`
+//       interpolado com 8 vars: nome, whatsapp, evento, data, convidados,
+//       preferencia, interesse, acao_sugerida)
 //   5. INSERT INTO timeline_events ('Handoff HOT', OTHER) + emit handoff_complete
 //
 // Atomicidade: 1+3+5 ficam em transação Drizzle (passos de banco). 2+4 (sends)
 // rodam fora da transação — não dá rollback de mensagem enviada. Estratégia:
 //   1. abre transação
-//   2. UPDATE is_human_active=true
+//   2. UPDATE is_human_active=true (+ interest_summary + suggested_action)
 //   3. INSERT tasks
 //   4. INSERT timeline_events
 //   5. commit
@@ -39,9 +45,20 @@ import { sql } from 'drizzle-orm';
 import { db } from '../db/client';
 import type { Hook, HookResult, HarnessContext } from '../harness/types';
 import type { ZapsterClient } from '../zapster/client';
+import { interpolateTemplate } from '../utils/template';
+import { humanizeEventType } from '../utils/event-type';
+import { formatPhone } from '../utils/phone';
+import { getLeadHandoffState } from '../utils/assisted-mode';
 
 interface HookParamsShape {
   transfer_message?: string;
+  /**
+   * Bloco 3 — feature `whatsapp-message-splitting-and-handoff-continuity`.
+   * Template humanizado renderizado via `interpolateTemplate` no passo 4.
+   * Vars suportadas: nome, whatsapp, evento, data, convidados, preferencia,
+   * interesse, acao_sugerida.
+   */
+  handoff_support_message_template?: string;
 }
 
 const DEFAULT_TRANSFER_MESSAGE =
@@ -89,6 +106,64 @@ function shouldTrigger(ctx: HarnessContext): {
   return { trigger: false };
 }
 
+/**
+ * Bloco 3 — extrai os 2 args opcionais (`interest_summary`, `suggested_action`)
+ * do último `tool_use` do turno, quando este foi `transfer_to_human`. Devolve
+ * `null` em ambos quando o handoff veio do ramo (b) (`classify_lead HOT`).
+ */
+function extractInterestArgs(
+  ctx: HarnessContext,
+): { interestSummary: string | null; suggestedAction: string | null } {
+  const last = ctx.lastToolCall;
+  if (last && last.name === 'transfer_to_human') {
+    const input = last.input as
+      | { interest_summary?: string; suggested_action?: string }
+      | undefined;
+    return {
+      interestSummary: input?.interest_summary?.trim() || null,
+      suggestedAction: input?.suggested_action?.trim() || null,
+    };
+  }
+  return { interestSummary: null, suggestedAction: null };
+}
+
+/**
+ * Bloco 3 — busca `preference_visit` em `contact_facts` (latest non-superseded).
+ * Retorna `null` quando o contato não tem fact deste tipo. Pattern
+ * `append-only-facts`: pegar o registro com `superseded_by IS NULL` e
+ * `confidence >= 0.5` (default), ordenado por `extracted_at DESC`.
+ *
+ * `fact_value` é JSONB e pode estar em 2 formas (defensivo):
+ *   - string direta (legado / `remember_fact` simples)
+ *   - objeto `{ value: "..." }` ou `{ text: "..." }` (estrutura genérica)
+ */
+async function fetchPreferenceVisit(
+  contactId: string,
+): Promise<string | null> {
+  const rows = await db.execute<{ fact_value: unknown }>(sql`
+    SELECT fact_value
+      FROM contact_facts
+     WHERE contact_id = ${contactId}
+       AND fact_type = 'preference_visit'
+       AND superseded_by IS NULL
+     ORDER BY extracted_at DESC
+     LIMIT 1
+  `);
+  const arr = Array.from(rows) as Array<{ fact_value: unknown }>;
+  if (arr.length === 0) return null;
+
+  const raw = arr[0].fact_value;
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === 'string') return raw;
+  if (typeof raw === 'object') {
+    const obj = raw as Record<string, unknown>;
+    if (typeof obj.value === 'string') return obj.value;
+    if (typeof obj.text === 'string') return obj.text;
+    if (typeof obj.preference === 'string') return obj.preference;
+  }
+  return null;
+}
+
 export function createTransferTriggerHook(client: ZapsterClient): Hook {
   return {
     name: 'transfer-trigger',
@@ -122,10 +197,57 @@ export function createTransferTriggerHook(client: ZapsterClient): Hook {
       }
 
       const leadId = ctx.lead.id;
+
+      // ─── Bloco 10 — gate de idempotência de handoff ────────────────────
+      // Edge case identificado no [note] do Bloco 6: caminho `classify_lead →
+      // HOT → transfer-trigger` pode disparar quando o lead JÁ está em modo
+      // assistido ou bloqueado (handoff anterior). Nesses casos, executar a
+      // sequência de 5 passos novamente cria task duplicada (FOLLOWUP HIGH),
+      // re-envia mensagem de transição e re-notifica suporte — comportamento
+      // que o operador acha confuso.
+      //
+      // Política: handoff dispara NO MÁXIMO 1× por lead. Se já está em
+      // handoff, curto-circuita ANTES do passo 1. Defensivo: se a query do
+      // helper falhar, segue adiante (fail-open) — a defesa em profundidade
+      // (response-guard 3a/3b) ainda intercepta as mensagens da IA.
+      try {
+        const handoffState = await getLeadHandoffState(leadId);
+        if (handoffState.mode === 'assisted' || handoffState.mode === 'blocked') {
+          ctx.eventBus.emit(
+            'transfer_trigger_skipped_in_handoff',
+            {
+              contact_id: ctx.contact.id,
+              lead_id: leadId,
+              state_mode: handoffState.mode,
+              handoff_reason: reason,
+            },
+            'info',
+          );
+          // Aborta o pipeline — IA NÃO envia mensagem adicional. A defesa
+          // em profundidade (Blocos 5+7) cobre eventual mensagem residual.
+          return { shortCircuit: true };
+        }
+      } catch (err) {
+        // Fail-open: erro de DB não impede o handoff legítimo. Emite med
+        // para observabilidade — se ocorrer com frequência, investigar.
+        ctx.eventBus.emit(
+          'transfer_trigger_gate_lookup_failed',
+          {
+            lead_id: leadId,
+            error: err instanceof Error ? err.message : String(err),
+          },
+          'med',
+        );
+      }
+
       const params = (ctx.config?.hookParams ?? {}) as HookParamsShape;
       const transferMessage =
         params.transfer_message ?? DEFAULT_TRANSFER_MESSAGE;
+      const supportTemplate = params.handoff_support_message_template;
       const supportWhatsapp = ctx.config?.supportWhatsapp ?? '';
+
+      // Bloco 3 — args opcionais vindos do Claude via tool `transfer_to_human`.
+      const { interestSummary, suggestedAction } = extractInterestArgs(ctx);
 
       // ─── Passos 1, 3, 5 em transação ───────────────────────────────────
       let taskId: string | null = null;
@@ -136,29 +258,41 @@ export function createTransferTriggerHook(client: ZapsterClient): Hook {
         guestCount: number | null;
         assignedToId: string | null;
         contactName: string | null;
+        contactPhone: string | null;
       } = {
         eventType: null,
         eventDate: null,
         guestCount: null,
         assignedToId: null,
         contactName: null,
+        contactPhone: null,
       };
 
       try {
         await db.transaction(async (tx) => {
           // Snapshot do lead para a notificação ao Juliano e para o metadata.
+          // Bloco 3: também busca telefone primário do contato (para template
+          // {{whatsapp}}) — usa contact_phones.is_primary=true (fallback first).
           const leadRows = await tx.execute<{
             event_type: string | null;
             event_date: string | null;
             guest_count: number | null;
             assigned_to_id: string | null;
             contact_name: string | null;
+            contact_phone: string | null;
           }>(sql`
             SELECT l.event_type::text       AS event_type,
                    l.event_date::text       AS event_date,
                    l.guest_count            AS guest_count,
                    l.assigned_to_id         AS assigned_to_id,
-                   c.name                   AS contact_name
+                   c.name                   AS contact_name,
+                   (
+                     SELECT phone FROM contact_phones cp
+                      WHERE cp.contact_id = c.id
+                      ORDER BY cp.is_primary DESC NULLS LAST,
+                               cp.is_whatsapp DESC NULLS LAST
+                      LIMIT 1
+                   )                        AS contact_phone
               FROM leads l
               JOIN contacts c ON c.id = l.contact_id
              WHERE l.id = ${leadId}
@@ -170,6 +304,7 @@ export function createTransferTriggerHook(client: ZapsterClient): Hook {
             guest_count: number | null;
             assigned_to_id: string | null;
             contact_name: string | null;
+            contact_phone: string | null;
           }>;
           if (leadArr.length === 0) {
             throw new Error(`transfer-trigger: lead ${leadId} not found`);
@@ -180,18 +315,38 @@ export function createTransferTriggerHook(client: ZapsterClient): Hook {
             guestCount: leadArr[0].guest_count,
             assignedToId: leadArr[0].assigned_to_id,
             contactName: leadArr[0].contact_name,
+            contactPhone: leadArr[0].contact_phone,
           };
 
           // Passo 1.
+          // Bloco 3: além de is_human_active, persiste interest_summary e
+          // suggested_action quando o Claude os passou via tool args. Se forem
+          // null, NÃO sobrescrevemos o que já estava no lead (preserva
+          // snapshot de um handoff anterior caso este seja segundo handoff).
           await tx.execute(sql`
-            UPDATE leads SET is_human_active = true WHERE id = ${leadId}
+            UPDATE leads SET
+              is_human_active  = true,
+              interest_summary = COALESCE(${interestSummary}, interest_summary),
+              suggested_action = COALESCE(${suggestedAction}, suggested_action)
+            WHERE id = ${leadId}
           `);
 
           // Passo 3 — INSERT tasks.
+          // Bloco 9: popula `assigned_to_phone` com o `support_whatsapp` da
+          // config ativa para o webhook handler (Bloco 9 task #39) conseguir
+          // resolver lead a partir do número emissor sem JOIN com `users`.
+          // Coluna criada na migration 20260509000000_handoff_continuity (D5).
+          // Quando `support_whatsapp` é vazio/null, persiste NULL — task ainda
+          // é criada mas o detection do webhook não vincula (caso degradado
+          // aceito; tasks legacy pré-Bloco-9 ficam sem vinculação automática).
+          const supportPhoneForTask =
+            supportWhatsapp && supportWhatsapp.trim() !== ''
+              ? supportWhatsapp.trim()
+              : null;
           const taskRows = await tx.execute<{ id: string }>(sql`
             INSERT INTO tasks (
               lead_id, contact_id, title, type, priority, status,
-              assigned_to_id, created_by_id
+              assigned_to_id, assigned_to_phone, created_by_id
             ) VALUES (
               ${leadId},
               ${ctx.contact.id},
@@ -200,6 +355,7 @@ export function createTransferTriggerHook(client: ZapsterClient): Hook {
               ${'HIGH'}::task_priority,
               ${'PENDING'}::task_status,
               ${leadSnapshot.assignedToId},
+              ${supportPhoneForTask},
               NULL
             )
             RETURNING id
@@ -216,6 +372,8 @@ export function createTransferTriggerHook(client: ZapsterClient): Hook {
             event_type: leadSnapshot.eventType,
             event_date: leadSnapshot.eventDate,
             guest_count: leadSnapshot.guestCount,
+            interest_summary: interestSummary,
+            suggested_action: suggestedAction,
           };
           const tlRows = await tx.execute<{ id: string }>(sql`
             INSERT INTO timeline_events (
@@ -269,8 +427,15 @@ export function createTransferTriggerHook(client: ZapsterClient): Hook {
         );
       }
 
-      // ─── Passo 4 — send notificação ao Juliano ────────────────────────
+      // ─── Passo 4 — send notificação ao Juliano (template humanizado) ──
+      // Bloco 3: usa `agent_configs.hook_params.handoff_support_message_template`
+      // interpolado via `interpolateTemplate`. Se ausente, fallback para texto
+      // legacy hardcoded (preserva comportamento de v2).
       let supportSent = false;
+      let supportTextRendered = '';
+      let supportTemplateUsed: 'configured' | 'legacy_fallback' | 'skipped' =
+        'skipped';
+
       if (!supportWhatsapp || supportWhatsapp.trim() === '') {
         ctx.eventBus.emit(
           'support_whatsapp_unset',
@@ -282,19 +447,71 @@ export function createTransferTriggerHook(client: ZapsterClient): Hook {
           'med',
         );
       } else {
-        const recipientLabel =
-          leadSnapshot.contactName ?? ctx.contact.phone ?? 'Contato';
-        const supportText =
-          `Lead HOT: ${recipientLabel}, ` +
-          `evento: ${leadSnapshot.eventType ?? '—'}, ` +
-          `data: ${leadSnapshot.eventDate ?? '—'}, ` +
-          `convidados: ${leadSnapshot.guestCount ?? '—'}\n` +
-          `Motivo: ${reason ?? '—'}`;
+        // Buscar preference_visit em contact_facts FORA da transação (a
+        // transação já commitou; leitura paralela ao send do cliente seria
+        // ideal, mas trade-off pequeno e mantém código sequencial simples).
+        let preferenceVisit: string | null = null;
+        try {
+          preferenceVisit = await fetchPreferenceVisit(ctx.contact.id);
+        } catch (err) {
+          // Falha ao buscar fact não pode quebrar o handoff. Loga e segue
+          // com '—' no template.
+          const message = err instanceof Error ? err.message : String(err);
+          ctx.eventBus.emit(
+            'handoff_facts_lookup_failed',
+            { lead_id: leadId, contact_id: ctx.contact.id, message },
+            'med',
+          );
+        }
+
+        const guestCountStr =
+          leadSnapshot.guestCount != null
+            ? `${leadSnapshot.guestCount} pessoas`
+            : '—';
+
+        const vars = {
+          nome: leadSnapshot.contactName ?? ctx.contact.name ?? '—',
+          whatsapp: formatPhone(
+            leadSnapshot.contactPhone ?? ctx.contact.phone ?? null,
+          ),
+          evento: humanizeEventType(leadSnapshot.eventType),
+          // ISO YYYY-MM-DD → BR DD/MM/YYYY via heurística do template helper
+          // (key 'data' bate em isDateKeyByName).
+          data: leadSnapshot.eventDate,
+          convidados: guestCountStr,
+          preferencia: preferenceVisit,
+          interesse: interestSummary,
+          acao_sugerida: suggestedAction,
+        };
+
+        if (supportTemplate && supportTemplate.trim() !== '') {
+          supportTextRendered = interpolateTemplate(supportTemplate, vars);
+          supportTemplateUsed = 'configured';
+        } else {
+          // Fallback legacy: texto v2 minimamente informativo.
+          ctx.eventBus.emit(
+            'handoff_template_missing',
+            {
+              lead_id: leadId,
+              reason:
+                'hook_params.handoff_support_message_template ausente — usando fallback legacy',
+            },
+            'info',
+          );
+          supportTextRendered =
+            `Lead HOT: ${vars.nome}, ` +
+            `evento: ${vars.evento}, ` +
+            `data: ${vars.data ?? '—'}, ` +
+            `convidados: ${vars.convidados}\n` +
+            `Motivo: ${reason ?? '—'}`;
+          supportTemplateUsed = 'legacy_fallback';
+        }
+
         try {
           await client.send({
             recipientId: supportWhatsapp,
             recipientType: 'chat',
-            text: supportText,
+            text: supportTextRendered,
           });
           supportSent = true;
         } catch (err) {
@@ -321,6 +538,9 @@ export function createTransferTriggerHook(client: ZapsterClient): Hook {
           timeline_event_id: timelineEventId,
           client_sent: clientSent,
           support_sent: supportSent,
+          support_template_used: supportTemplateUsed,
+          interest_summary_set: interestSummary != null,
+          suggested_action_set: suggestedAction != null,
           reason: reason ?? null,
         },
         'info',

@@ -32,6 +32,11 @@ import { run as harnessRun } from '../harness/loop';
 import { resolveContactFromPhone, normalizeE164 } from '../contacts/resolveContact';
 import { resolveActiveLead } from '../contacts/resolveActiveLead';
 import { claimMessage } from '../harness/idempotency';
+import { findActiveByKey } from '../config/agent-configs';
+import {
+  detectSupportInbound,
+  isSupportPhone,
+} from '../edge/detect-support-inbound';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tipos
@@ -112,17 +117,101 @@ function makeProcessor(logger: MinimalLogger) {
       `processing job=${job.id} attempt=${attempt} consolidated=${consolidated.length}`,
     );
 
+    // Mensagem primária do bucket (a mais recente). É ela que dispara o
+    // turno principal — declarada aqui para também ser usada pelo Bloco 9
+    // detection abaixo.
+    const primary: DrainedMessage = consolidated[consolidated.length - 1];
+    const earlies = consolidated.slice(0, -1);
+
+    // ── Bloco 9 — webhook detection do support_whatsapp ──────────────────
+    //
+    // Antes de processar como turno do cliente, verifica se o sender é o
+    // vendedor (support_whatsapp) respondendo a um lead em handoff. Se for E
+    // a mensagem NÃO for um comando admin (`/...`), executa detection +
+    // UPDATE idempotente em `leads.handoff_assumed_at` e CURTO-CIRCUITA o
+    // job — NÃO chama `harnessRun`. Razão: mensagem do vendedor não é turno
+    // do cliente; tratá-la como tal causaria a IA "responder ao vendedor"
+    // (bug óbvio).
+    //
+    // Prioridade (cobre overlap support_whatsapp ⊆ admin_phones):
+    //   1. mensagem começa com `/` → trata como admin (segue fluxo normal;
+    //      admin-router roda como hook BEFORE_REQUEST e processa o comando,
+    //      mesmo se phone é admin+support).
+    //   2. phone == support_whatsapp (e não é admin cmd) → detection +
+    //      shortCircuit job.
+    //   3. phone não é support_whatsapp → segue fluxo normal (cliente comum
+    //      ou admin sem prefixo `/`).
+    //
+    // Cuidado: este detection roda sobre a MENSAGEM PRIMÁRIA do bucket
+    // (a mais recente). Mensagens consecutivas do mesmo vendedor (mesmo
+    // burst) cairão aqui também, mas o UPDATE em `detectSupportInbound` é
+    // idempotente (`WHERE handoff_assumed_at IS NULL`), então só a 1ª seta
+    // o timestamp.
+    try {
+      const config = await findActiveByKey('angelina');
+      if (config !== null) {
+        const supportConfig = config.supportWhatsapp ?? null;
+        const primaryText = primary.payload.data.message.text ?? '';
+        const isAdminCommand = primaryText.trimStart().startsWith('/');
+
+        if (!isAdminCommand && isSupportPhone(phone, supportConfig)) {
+          const result = await detectSupportInbound(phone);
+          if (result.detected) {
+            logger.info(
+              {
+                event: 'handoff_assumed_via_webhook',
+                severity: 'med',
+                lead_id: result.leadId,
+                source_phone: phone,
+                already_assumed: result.alreadyAssumed,
+                jobId: job.id,
+                zapster_message_id: primary.payload.data.message.id,
+              },
+              `handoff_assumed_via_webhook lead=${result.leadId} already_assumed=${result.alreadyAssumed}`,
+            );
+          } else {
+            logger.info(
+              {
+                event: 'support_inbound_no_task',
+                severity: 'info',
+                source_phone: phone,
+                reason: result.reason,
+                jobId: job.id,
+                zapster_message_id: primary.payload.data.message.id,
+              },
+              `support_inbound_no_task source_phone=${phone} reason=${result.reason}`,
+            );
+          }
+          // Curto-circuita: NÃO chama harnessRun. Mensagem do vendedor NÃO
+          // vira turno do cliente. Auditoria fica via traces de log estruturado
+          // (event:handoff_assumed_via_webhook ou support_inbound_no_task).
+          return;
+        }
+      }
+    } catch (err) {
+      // Falha no lookup de config OU na detection NÃO derruba o turno —
+      // segue fluxo normal (path degradado). Em prod, este caminho dispara
+      // alerta via log error.
+      logger.error(
+        {
+          event: 'support_inbound_detection_failed',
+          jobId: job.id,
+          phone,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'support inbound detection failed — falling back to normal harness run',
+      );
+    }
+
     // ── Pré-claim das mensagens 0..N-2 (Bloco 12.5 — fix duplicidade) ────
     //
     // Cada `zapster_message_id` precisa ter sua row INBOUND para:
     //   (a) integridade do histórico no L1 (Anthropic vê cada user msg);
     //   (b) idempotência contra retransmits do Zapster (UNIQUE constraint).
     //
-    // A última (N-1) fica para o harness claim normalmente — ela vira a
-    // mensagem "primária" que dispara este turno.
-    const primary: DrainedMessage = consolidated[consolidated.length - 1];
-    const earlies = consolidated.slice(0, -1);
-
+    // `primary` (mais recente) e `earlies` (anteriores) já foram declarados
+    // antes do bloco de detection do Bloco 9. A última fica para o harness
+    // claim normalmente — ela é a mensagem "primária" que dispara este turno.
     if (earlies.length > 0) {
       try {
         const normPhone = normalizeE164(phone);

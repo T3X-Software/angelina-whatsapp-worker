@@ -54,6 +54,7 @@ import pino from 'pino';
 
 import { createEventBus } from './event-bus';
 import { claimMessage } from './idempotency';
+import { setCurrentTurn } from './turn-tracker';
 import { buildHookPipeline } from '../hooks';
 import { ZapsterClient } from '../zapster/client';
 import { sendWithStateMachine } from '../zapster/sender';
@@ -605,6 +606,12 @@ export async function run(
     // [7] turnId passa a ser o messageId (decisão brief #29).
     turnId = messageId;
 
+    // Bloco 2 (feature whatsapp-message-splitting-and-handoff-continuity, #10):
+    // marca este turnId como o turno corrente do contato. Usado pelo
+    // response-guard (em iterações de split) para descartar partes stale
+    // quando o cliente envia uma nova mensagem entre o split-N e split-N+1.
+    setCurrentTurn(contactId, turnId);
+
     // Trace inicial — útil para correlacionar com logs do consumer.
     bus.emit(
       'webhook_received',
@@ -1092,50 +1099,184 @@ export async function run(
       'info',
     );
 
-    // [15] Hooks BEFORE_SEND.
-    const beforeSend = await runPhase('BEFORE_SEND', ctx);
-    if (beforeSend.shortCircuited) {
+    // [15] Hooks BEFORE_SEND + send.
+    //
+    // Bloco 2 (feature whatsapp-message-splitting-and-handoff-continuity):
+    // quando o splitter (`format-whatsapp`) populou `ctx.messages` com >1 parte,
+    // iteramos BEFORE_SEND + send N vezes (1 por parte) com delay configurável
+    // (`message_split.interval_ms`) entre os sends. Quando length<=1, fluxo
+    // legacy preservado: 1 BEFORE_SEND + 1 send.
+    //
+    // Decisão (sub-T2.3 do Bloco 2): só ramifica se messages.length > 1; caso
+    // contrário, mantém path original sem overhead.
+    //
+    // Persistência: o INSERT outbound em [14] foi 1 row com texto UNIFICADO
+    // (concat das partes em \n\n) — registro único do turno. Os sends das
+    // partes individuais não criam rows extras em `messages` (auditoria via
+    // traces `zapster_send_dispatch`/`zapster_send_success` por parte).
+    // sendWithStateMachine ainda atualiza send_status atomicamente uma vez —
+    // a primeira chamada faz pending→sent; chamadas subsequentes são race_lost
+    // (esperado e tracado como tal). O outbound vai a `sent` na 1ª parte.
+    const splitParts = ctx.messages ?? [];
+    const useSplit = splitParts.length > 1;
+
+    if (useSplit) {
+      const splitParams = (ctx.config?.hookParams ?? {}) as
+        | { message_split?: { interval_ms?: number } }
+        | undefined;
+      const intervalMs = splitParams?.message_split?.interval_ms ?? 1500;
+      ctx.partTotal = splitParts.length;
+
       bus.emit(
-        'turn_short_circuit',
-        { phase: 'BEFORE_SEND', hook: beforeSend.hookName },
+        'split_send_start',
+        {
+          parts: splitParts.length,
+          interval_ms: intervalMs,
+          outbound_id: outboundId,
+        },
         'info',
       );
-      // Marca outbound como failed (response-guard bloqueou — não vai enviar).
-      await db.execute(sql`
-        UPDATE messages SET send_status = 'failed'
-         WHERE id = ${outboundId} AND send_status = 'pending'
-      `);
-      await bus.flushToDatabase();
-      return {
-        status: 'short_circuit',
-        turnId,
-        inboundMessageId: messageId,
-        outboundMessageId: outboundId,
-        reason: `short-circuit at BEFORE_SEND/${beforeSend.hookName}`,
-      };
-    }
 
-    // [16] State machine atômica + Zapster send REAL (Bloco 9).
-    //
-    // Texto vai do `ctx.responseToSend` (já formatado por format-whatsapp e
-    // setado logo acima na etapa [14]). Recipient é o phone do cliente
-    // (E.164 sem `+`, convenção do projeto consolidada no Bloco 4) com o
-    // mesmo `recipient_type` (chat/group) que veio no payload.
-    //
-    // sendWithStateMachine retorna `sent | failed | race_lost` mas NÃO throwa
-    // — falha é registrada no banco (send_status='failed') + trace
-    // `zapster_send_failure` (high). Não interrompemos o restante do turno
-    // (updateLastActivity, turn_complete) — race_lost também segue o fluxo.
-    await sendWithStateMachine(
-      outboundId,
-      zapsterClient,
-      {
-        recipientId: ctx.contact.phone,
-        recipientType: payload.data.recipient.type,
-        text: outboundText,
-      },
-      bus,
-    );
+      let partsSent = 0;
+      for (let i = 0; i < splitParts.length; i++) {
+        ctx.partIndex = i;
+        ctx.currentMessage = splitParts[i];
+        // `responseToSend` é re-apontado por parte para que human-delay e
+        // response-guard avaliem cada parte (delay proporcional, classifier
+        // correto, etc.). Essa mutação é segura: ambos hooks leem ctx fresh
+        // no início de cada `runPhase`.
+        ctx.responseToSend = splitParts[i];
+
+        const partPhase = await runPhase('BEFORE_SEND', ctx);
+        if (partPhase.shortCircuited) {
+          bus.emit(
+            'turn_short_circuit',
+            {
+              phase: 'BEFORE_SEND',
+              hook: partPhase.hookName,
+              part_index: i,
+              part_total: splitParts.length,
+              reason: 'split_part_blocked',
+            },
+            'info',
+          );
+          // Se a 1ª parte foi bloqueada, marca outbound como failed (nada saiu).
+          // Se já enviamos parte ≥1, mantém status atual ('sent') — auditoria
+          // mostra que partes [i..N) não foram enviadas via traces.
+          if (partsSent === 0) {
+            await db.execute(sql`
+              UPDATE messages SET send_status = 'failed'
+               WHERE id = ${outboundId} AND send_status = 'pending'
+            `);
+            await bus.flushToDatabase();
+            return {
+              status: 'short_circuit',
+              turnId,
+              inboundMessageId: messageId,
+              outboundMessageId: outboundId,
+              reason: `short-circuit at BEFORE_SEND/${partPhase.hookName} (part ${i}/${splitParts.length})`,
+            };
+          }
+          // Parte intermediária bloqueada (ex: stale_turn): para o loop e
+          // sai do split — turno encerra normalmente, partes restantes
+          // descartadas.
+          bus.emit(
+            'split_send_aborted',
+            {
+              part_index: i,
+              part_total: splitParts.length,
+              parts_sent: partsSent,
+              hook: partPhase.hookName,
+            },
+            'med',
+          );
+          break;
+        }
+
+        await sendWithStateMachine(
+          outboundId,
+          zapsterClient,
+          {
+            recipientId: ctx.contact.phone,
+            recipientType: payload.data.recipient.type,
+            text: ctx.responseToSend,
+          },
+          bus,
+        );
+        partsSent++;
+
+        bus.emit(
+          'split_part_sent',
+          {
+            part_index: i,
+            part_total: splitParts.length,
+            chars: ctx.responseToSend.length,
+          },
+          'info',
+        );
+
+        // Delay entre partes (não após a última).
+        if (i < splitParts.length - 1) {
+          await new Promise<void>((resolve) => setTimeout(resolve, intervalMs));
+        }
+      }
+
+      // Limpa flags do split antes de seguir para [17].
+      ctx.partIndex = undefined;
+      ctx.partTotal = undefined;
+      ctx.currentMessage = undefined;
+
+      bus.emit(
+        'split_send_complete',
+        { parts_sent: partsSent, parts_total: splitParts.length },
+        'info',
+      );
+    } else {
+      // Path legacy — 1 BEFORE_SEND + 1 send.
+      const beforeSend = await runPhase('BEFORE_SEND', ctx);
+      if (beforeSend.shortCircuited) {
+        bus.emit(
+          'turn_short_circuit',
+          { phase: 'BEFORE_SEND', hook: beforeSend.hookName },
+          'info',
+        );
+        // Marca outbound como failed (response-guard bloqueou — não vai enviar).
+        await db.execute(sql`
+          UPDATE messages SET send_status = 'failed'
+           WHERE id = ${outboundId} AND send_status = 'pending'
+        `);
+        await bus.flushToDatabase();
+        return {
+          status: 'short_circuit',
+          turnId,
+          inboundMessageId: messageId,
+          outboundMessageId: outboundId,
+          reason: `short-circuit at BEFORE_SEND/${beforeSend.hookName}`,
+        };
+      }
+
+      // [16] State machine atômica + Zapster send REAL (Bloco 9).
+      //
+      // Texto vai do `ctx.responseToSend` (já formatado por format-whatsapp e
+      // setado logo acima na etapa [14]). Recipient é o phone do cliente
+      // (E.164 sem `+`, convenção do projeto consolidada no Bloco 4) com o
+      // mesmo `recipient_type` (chat/group) que veio no payload.
+      //
+      // sendWithStateMachine retorna `sent | failed | race_lost` mas NÃO throwa
+      // — falha é registrada no banco (send_status='failed') + trace
+      // `zapster_send_failure` (high). Não interrompemos o restante do turno
+      // (updateLastActivity, turn_complete) — race_lost também segue o fluxo.
+      await sendWithStateMachine(
+        outboundId,
+        zapsterClient,
+        {
+          recipientId: ctx.contact.phone,
+          recipientType: payload.data.recipient.type,
+          text: outboundText,
+        },
+        bus,
+      );
+    }
 
     // [17] Atualiza last_activity_at do lead (se houver).
     if (leadId) {

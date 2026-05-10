@@ -214,6 +214,24 @@ export const leads = pgTable('leads', {
   estimatedBudget: numeric('estimated_budget'),
   status: leadStatusEnum('status').default('OPEN'),
   isHumanActive: boolean('is_human_active').notNull().default(false),
+  // Migration 20260509000000_handoff_continuity (feature
+  // whatsapp-message-splitting-and-handoff-continuity, Bloco 1).
+  // 3 estados de is_human_active via handoff_assumed_at:
+  //   isHumanActive=false                      → modo normal (IA livre).
+  //   isHumanActive=true && assumedAt IS NULL  → handoff disparado, modo
+  //                                              assistido (IA continua com
+  //                                              restrições do response-guard).
+  //   isHumanActive=true && assumedAt NOT NULL → humano assumiu, IA fica 100%
+  //                                              muda. Setado por webhook
+  //                                              detection ou /assumi <lead_id>.
+  handoffAssumedAt: timestamp('handoff_assumed_at', { withTimezone: true }),
+  // Snapshot do interesse do lead no momento do handoff. Gerado pelo Claude
+  // e passado como argumento da tool transfer_to_human (Bloco 3).
+  interestSummary: text('interest_summary'),
+  // Snapshot da ação sugerida ao operador no momento do handoff. Gerado pelo
+  // Claude e passado como argumento da tool transfer_to_human (Bloco 3).
+  // Usado para preencher {{acao_sugerida}} no template handoff_support_message_template.
+  suggestedAction: text('suggested_action'),
   lastActivityAt: timestamp('last_activity_at', { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -234,6 +252,12 @@ export const tasks = pgTable('tasks', {
   status: taskStatus('status').notNull().default('PENDING'),
   priority: taskPriority('priority').notNull().default('MEDIUM'),
   assignedToId: uuid('assigned_to_id'),
+  // Migration 20260509000000_handoff_continuity (feature
+  // whatsapp-message-splitting-and-handoff-continuity, Bloco 1).
+  // Phone do support_whatsapp atribuído à task. Denormalizado para hot-path do
+  // webhook handler (Bloco 9) que vincula inbound→lead sem JOIN com users.
+  // Convenção de format: sem '+', igual Zapster (ex 5519974131955).
+  assignedToPhone: text('assigned_to_phone'),
   createdById: uuid('created_by_id'),
   createdAt: timestamp('created_at', { withTimezone: true })
     .notNull()
