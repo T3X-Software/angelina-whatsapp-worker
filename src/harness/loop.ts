@@ -1114,9 +1114,8 @@ export async function run(
     // (concat das partes em \n\n) — registro único do turno. Os sends das
     // partes individuais não criam rows extras em `messages` (auditoria via
     // traces `zapster_send_dispatch`/`zapster_send_success` por parte).
-    // sendWithStateMachine ainda atualiza send_status atomicamente uma vez —
-    // a primeira chamada faz pending→sent; chamadas subsequentes são race_lost
-    // (esperado e tracado como tal). O outbound vai a `sent` na 1ª parte.
+    // Parte 1: sendWithStateMachine (pending→sent, anti-double-send entre workers).
+    // Partes 2-N: zapsterClient.send() direto (row já está em 'sent', bypass do guard).
     const splitParts = ctx.messages ?? [];
     const useSplit = splitParts.length > 1;
 
@@ -1193,16 +1192,71 @@ export async function run(
           break;
         }
 
-        await sendWithStateMachine(
-          outboundId,
-          zapsterClient,
-          {
-            recipientId: ctx.contact.phone,
-            recipientType: payload.data.recipient.type,
-            text: ctx.responseToSend,
-          },
-          bus,
-        );
+        let sendOk = true;
+        let zapsterMessageId: string | undefined;
+
+        if (i === 0) {
+          // 1ª parte: state machine cuida de pending → sending → sent (anti-double-send entre workers).
+          const result = await sendWithStateMachine(
+            outboundId,
+            zapsterClient,
+            {
+              recipientId: ctx.contact.phone,
+              recipientType: payload.data.recipient.type,
+              text: ctx.responseToSend,
+            },
+            bus,
+          );
+          sendOk = result.status === 'sent';
+          zapsterMessageId = result.zapsterMessageId;
+        } else {
+          // Partes 2-N: bypass do state machine (row já está em 'sent' pela parte 1).
+          // Pattern já existente em transfer-trigger e human-delay (chamadas diretas).
+          bus.emit(
+            'zapster_send_dispatch',
+            { outbound_id: outboundId, part_index: i },
+            'info',
+          );
+          try {
+            const r = await zapsterClient.send({
+              recipientId: ctx.contact.phone,
+              recipientType: payload.data.recipient.type,
+              text: ctx.responseToSend,
+            });
+            bus.emit(
+              'zapster_send_success',
+              {
+                outbound_id: outboundId,
+                part_index: i,
+                zapster_message_id: r.zapsterMessageId,
+              },
+              'info',
+            );
+            zapsterMessageId = r.zapsterMessageId;
+          } catch (err) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            bus.emit(
+              'zapster_send_failure',
+              { outbound_id: outboundId, part_index: i, error: errMsg },
+              'high',
+            );
+            sendOk = false;
+          }
+        }
+
+        if (!sendOk) {
+          bus.emit(
+            'split_send_aborted',
+            {
+              part_index: i,
+              part_total: splitParts.length,
+              parts_sent: partsSent,
+              reason: 'send_failed',
+            },
+            'med',
+          );
+          break; // não envia partes restantes para preservar coerência
+        }
         partsSent++;
 
         bus.emit(
