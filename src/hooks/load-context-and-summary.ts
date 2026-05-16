@@ -124,6 +124,7 @@ export const loadContextAndSummary: Hook = {
       l2: composed.l2,
       system: finalSystem,
       tokenEstimate: composed.tokenEstimate,
+      ragActive: composed.ragActive,
     };
 
     ctx.eventBus.emit(

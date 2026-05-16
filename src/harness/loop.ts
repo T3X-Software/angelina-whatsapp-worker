@@ -1354,6 +1354,11 @@ export async function run(
         turn_latency_ms: totalLatency,
         inbound_id: messageId,
         outbound_id: outboundId,
+        // Bloco 5 — feature `rag-knowledge-population`. True quando o composer
+        // anexou a seção `## Conhecimento relevante` neste turno. Útil para
+        // SQL agg "% de turnos com RAG ativo". Defensive default false quando
+        // memory ausente (path edge sem hook BEFORE_REQUEST).
+        rag_active: ctx.memory?.ragActive ?? false,
       },
       'info',
     );

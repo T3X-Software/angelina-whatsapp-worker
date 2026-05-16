@@ -254,6 +254,12 @@ export interface HarnessContext {
     l2: string;
     system?: string;
     tokenEstimate?: number;
+    /**
+     * Bloco 5 — feature `rag-knowledge-population`. True quando o composer
+     * efetivamente anexou a seção `## Conhecimento relevante` ao system.
+     * Loop lê em `turn_complete.rag_active` para análise agregada.
+     */
+    ragActive?: boolean;
   };
 
   payload: WebhookPayload;

@@ -118,6 +118,15 @@ export const formatWhatsapp: Hook = {
   phase: 'AFTER_MODEL',
 
   async run(ctx: HarnessContext): Promise<HookResult> {
+    // DIAG TEMPORÁRIO 2026-05-10 — remover após confirmar hook executa em prod.
+    // Visível no `pm2 logs angelina-worker`. Se NÃO aparecer, hook não roda
+    // (build dist desatualizado, ou transfer-trigger curto-circuitou antes).
+    console.log(
+      `[format-whatsapp] running turn=${ctx.turn?.id ?? 'unknown'} ` +
+        `text_len=${(ctx.lastModelText ?? '').length} ` +
+        `has_message_split_cfg=${Boolean((ctx.config?.hookParams as { message_split?: unknown } | undefined)?.message_split)}`,
+    );
+
     const before = ctx.lastModelText ?? '';
     const after = formatWhatsappText(before);
     ctx.lastModelText = after;

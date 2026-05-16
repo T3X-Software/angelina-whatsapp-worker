@@ -111,6 +111,8 @@ export interface AssistedModeConfig {
  *   - `transfer-trigger.ts` → `handoffSupportMessageTemplate`
  *   - `response-guard.ts` → `assistedMode.classifier` + `redirectMessages`
  *   - `load-context.ts` → `assistedMode.addendum`
+ *   - `memory/composer.ts` + `memory/l4-rag.ts` → `rag` (Bloco 2-4 da feature
+ *     `rag-knowledge-population`, migration 20260510120000)
  *
  * **Convenção:** lê via `(ctx.config?.hookParams ?? {}) as HandoffContinuityHookParams`
  * (mesmo padrão `as HookParamsShape` dos hooks pré-existentes).
@@ -119,4 +121,49 @@ export interface HandoffContinuityHookParams {
   message_split?: MessageSplitConfig;
   handoff_support_message_template?: string;
   assisted_mode?: AssistedModeConfig;
+  rag?: RagConfig;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RAG (Bloco 2 — feature `rag-knowledge-population`)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Sub-objeto `agent_configs.hook_params.rag` (migration 20260510120000).
+ *
+ * Consumido por:
+ *   - `memory/composer.ts` → orquestração do L4
+ *   - `memory/l4-rag.ts` → query embed + filtro por threshold + format section
+ *   - `scripts/embeddings-backfill.ts` → trunca content por artigo
+ *
+ * Defaults v4 (canon na migration acima):
+ *   { top_k: 3, threshold: 0.7, model: 'text-embedding-3-small',
+ *     max_chars_per_article: 600, max_chars_total_section: 2000 }
+ *
+ * **Threshold é rígido** (concept `rag-knowledge`): artigos com similarity
+ * abaixo do valor são DESCARTADOS, não retornados como fallback. Top-K acima
+ * de threshold pode retornar 0, 1, 2 ou 3 artigos — "até top-3", não
+ * "exatamente top-3".
+ */
+export interface RagConfig {
+  top_k: number;
+  threshold: number;
+  model: string;
+  max_chars_per_article: number;
+  max_chars_total_section: number;
+}
+
+/**
+ * Linha de `knowledge_articles` enriquecida com similaridade calculada
+ * pelo pgvector (`1 - (embedding <=> $1)`). Retornada por `loadL4Rag`
+ * para o composer (Bloco 4).
+ *
+ * `similarity` é cosseno (0..1) — quanto mais perto de 1, mais relevante.
+ */
+export interface KnowledgeArticleMatch {
+  id: string;
+  title: string;
+  content: string;
+  category: string;
+  similarity: number;
 }
