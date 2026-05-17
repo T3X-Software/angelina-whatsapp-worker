@@ -25,6 +25,8 @@ import { closeInboundQueue } from './queue/producer';
 import { startConsumer, closeConsumer } from './queue/consumer';
 import { attachDLQHandler } from './queue/dlq-handler';
 import { closeDb } from './db/client';
+import { ZapsterClient } from './zapster/client';
+import { startFollowUpCron } from './jobs/follow-up-checker';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Logger
@@ -49,6 +51,7 @@ const logger = pino({
 
 let server: FastifyInstance | null = null;
 let bullWorker: Worker | null = null;
+let followUpCronHandle: NodeJS.Timeout | null = null;
 let shuttingDown = false;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -82,6 +85,19 @@ async function shutdown(signal: string): Promise<void> {
       logger.info('HTTP server closed');
     } catch (err) {
       logger.error({ err }, 'Error closing HTTP server');
+    }
+  }
+
+  // Para o cron de follow-up (Bloco 4). Tick em andamento, se houver, completa
+  // o trabalho atual antes do clearInterval — o `setInterval` não cancela
+  // execuções em vôo, apenas evita NOVOS agendamentos.
+  if (followUpCronHandle) {
+    try {
+      clearInterval(followUpCronHandle);
+      followUpCronHandle = null;
+      logger.info('Follow-up cron interval cleared');
+    } catch (err) {
+      logger.error({ err }, 'Error clearing follow-up cron');
     }
   }
 
@@ -152,6 +168,16 @@ async function main(): Promise<void> {
   // 3. BullMQ consumer + DLQ handler.
   bullWorker = startConsumer(logger);
   attachDLQHandler(bullWorker, logger);
+
+  // 4. Follow-up cron (Bloco 4 — feature follow-up-pendente).
+  // Cron job paralelo ao pipeline de turnos — NÃO é hook. Lê config viva
+  // de agent_configs.hook_params.follow_up (cache TTL 30s). Kill switch:
+  // UPDATE agent_configs SET hook_params = jsonb_set(...'{follow_up,enabled}','false').
+  const zapsterClientForCron = new ZapsterClient(logger);
+  followUpCronHandle = await startFollowUpCron({
+    zapsterClient: zapsterClientForCron,
+    logger,
+  });
 
   logger.info('whatsapp-worker ready');
 }

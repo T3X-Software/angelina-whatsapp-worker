@@ -167,3 +167,82 @@ export interface KnowledgeArticleMatch {
   category: string;
   similarity: number;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Follow-up Pendente (Bloco 2 — feature `follow-up-pendente`)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Categorias do follow-up — discriminam qual dos 5 templates é usado pelo
+ * renderer (D7'). Detecção via pipeline híbrido (D11'):
+ *   1. regex sobre última msg OUTBOUND do agente;
+ *   2. fallback por campo NULL do lead (event_type → tipo_evento, etc;
+ *      orcamento NÃO detectável por estado — só por regex);
+ *   3. fallback genérico usando `{{pergunta_extraida}}` (última frase com `?`
+ *      sem o `?`, ou últimas 10 palavras).
+ */
+export type FollowUpCategoria =
+  | 'tipo_evento'
+  | 'data'
+  | 'convidados'
+  | 'orcamento'
+  | 'generico';
+
+/**
+ * Janela de horário comercial — `start`/`end` em HH:MM 24h, `timezone` IANA.
+ * Default v5: { start: '09:00', end: '20:00', timezone: 'America/Sao_Paulo' }.
+ */
+export interface FollowUpBusinessHours {
+  start: string;
+  end: string;
+  timezone: string;
+}
+
+/**
+ * 5 templates literais por categoria (D7'). Renderer monta automaticamente
+ * `Oi {{nome}}! ` + `<template da categoria>`. Apenas `generico` aceita a
+ * variável dinâmica `{{pergunta_extraida}}` (interpolada via
+ * `interpolateTemplate`); os outros 4 não têm variáveis interpoladas
+ * (são fixos no v1).
+ */
+export interface FollowUpTemplates {
+  tipo_evento: string;
+  data: string;
+  convidados: string;
+  orcamento: string;
+  generico: string;
+}
+
+/**
+ * Sub-objeto `agent_configs.hook_params.follow_up` (migration
+ * 20260517100000_follow_up_pipeline).
+ *
+ * Consumido por:
+ *   - `jobs/follow-up-checker.ts` → todos os knobs.
+ *   - `templates/follow-up-message.ts` → `templates`.
+ *   - `tools/transfer-to-human-standalone.ts` → `escalation_support_template`.
+ *   - `rules/follow-up-rules.ts` → `business_hours`, `threshold_minutes`,
+ *     `max_attempts_per_24h`, `cooldown_minutes`.
+ *
+ * Todos os campos são editáveis sem deploy via `jsonb_set` em
+ * `agent_configs.hook_params` (concept `hot-reload-config` — cache TTL 30s).
+ *
+ * **Kill switch:** `enabled: false` faz o cron pular todos os ticks (emit
+ * `follow_up_cron_tick_disabled`).
+ */
+export interface FollowUpConfig {
+  enabled: boolean;
+  threshold_minutes: number;
+  max_attempts_per_24h: number;
+  cooldown_minutes: number;
+  business_hours: FollowUpBusinessHours;
+  rate_limit_sleep_ms: number;
+  cron_interval_ms: number;
+  templates: FollowUpTemplates;
+  escalation_support_template: string;
+}
+
+/** Extensão de `HandoffContinuityHookParams` com a chave nova `follow_up`. */
+export interface FollowUpHookParams {
+  follow_up?: FollowUpConfig;
+}

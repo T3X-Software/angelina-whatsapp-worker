@@ -33,6 +33,11 @@
 //     + enums correspondentes do CRM (lead_score, lead_status_enum,
 //     event_type, task_type, task_status, task_priority,
 //     timeline_event_type, pipeline_column_type).
+//   - 2026-05-17 (follow-up-pendente, Bloco 1 — Task #8) — adicionada coluna
+//     `leads.followUpDisabled` (boolean NOT NULL default false) + tabela nova
+//     `follow_up_attempts` (histórico de tentativas de follow-up automático
+//     com responded_at preenchido pelo response-tracker). Migration:
+//     20260517100000_follow_up_pipeline.sql.
 
 import { sql } from 'drizzle-orm';
 import {
@@ -232,6 +237,12 @@ export const leads = pgTable('leads', {
   // Claude e passado como argumento da tool transfer_to_human (Bloco 3).
   // Usado para preencher {{acao_sugerida}} no template handoff_support_message_template.
   suggestedAction: text('suggested_action'),
+  // Migration 20260517100000_follow_up_pipeline (feature follow-up-pendente).
+  // Desativa follow-ups automáticos para este lead. Setado true pela escalação
+  // automática (RF5) após 2 tentativas sem resposta. Reativar via comando admin
+  // /reativar-followup <phone> ou UPDATE manual. NÃO confundir com
+  // contacts.ai_state (manual): este é controle AUTOMÁTICO da harness.
+  followUpDisabled: boolean('follow_up_disabled').notNull().default(false),
   lastActivityAt: timestamp('last_activity_at', { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -478,3 +489,37 @@ export const knowledgeArticles = pgTable('knowledge_articles', {
     .notNull()
     .defaultNow(),
 });
+
+// =====================================================================
+// follow_up_attempts
+// =====================================================================
+//
+// Migration 20260517100000_follow_up_pipeline (feature follow-up-pendente).
+// Histórico de tentativas de follow-up automático por contato. attempt_number
+// conta tentativas na janela móvel de 24h (max_attempts_per_24h em hook_params).
+// responded_at é preenchido pelo response-tracker (cron secundário) quando o
+// cliente responde após o envio do follow-up; response_time_minutes derivado.
+
+export const followUpAttempts = pgTable(
+  'follow_up_attempts',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    contactId: uuid('contact_id')
+      .notNull()
+      .references(() => contacts.id, { onDelete: 'cascade' }),
+    leadId: uuid('lead_id').references(() => leads.id, { onDelete: 'set null' }),
+    attemptNumber: integer('attempt_number').notNull(),
+    sentAt: timestamp('sent_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    templateUsed: text('template_used'),
+    respondedAt: timestamp('responded_at', { withTimezone: true }),
+    responseTimeMinutes: integer('response_time_minutes'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow(),
+  },
+  (t) => [
+    index('idx_follow_up_attempts_contact').on(t.contactId, t.sentAt.desc()),
+    // idx_follow_up_attempts_unresponded é parcial (WHERE responded_at IS NULL)
+    // — declarado na migration; Drizzle não modela WHERE em index() helper.
+  ],
+);

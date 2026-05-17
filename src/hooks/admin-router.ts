@@ -22,6 +22,9 @@
 //   - `/assumi <lead_id>`   → SET handoff_assumed_at=NOW   (admin-only) [Bloco 8]
 //   - `/devolver <lead_id>` → SET is_human_active=false +
 //                              handoff_assumed_at=NULL      (admin-only) [Bloco 8]
+//   - `/reativar-followup <phone>` → SET leads.follow_up_disabled=false do lead
+//                              ativo (status=OPEN) do contato (admin-only)
+//                              [feature follow-up-pendente, Bloco 6]
 //
 // Decisão (registrada no log do Bloco 6 — abertura): a `response` retornada
 // neste hook (ex.: "✅ Agente pausado.") fica no contexto via `responseToSend`
@@ -47,14 +50,66 @@ type AdminCommand =
   | 'status'
   | 'limpar'
   | 'assumi'
-  | 'devolver';
+  | 'devolver'
+  | 'reativar-followup';
 
 interface HookParamsShape {
   admin_phones?: string[];
 }
 
+// Importante: `reativar-followup` vem ANTES de outras alternativas que poderiam
+// fazer prefix-match (não há risco atual; convenção defensiva).
 const ADMIN_REGEX =
-  /^\s*\/(pausar|retomar|transferir|status|limpar|assumi|devolver)\b\s*(.*)$/i;
+  /^\s*\/(reativar-followup|pausar|retomar|transferir|status|limpar|assumi|devolver)\b\s*(.*)$/i;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// /reativar-followup helpers (feature follow-up-pendente, Bloco 6)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Formato Zapster: phone sem `+`, dígitos contínuos (ex: '5519997124472').
+ * Mínimo 10 dígitos (cobre prefixo de teste `5500000XXX`).
+ */
+const PHONE_REGEX = /^\d{10,15}$/;
+
+interface ContactPhoneResolveRow {
+  contact_id: string;
+  contact_name: string | null;
+  lead_id: string | null;
+  lead_follow_up_disabled: boolean | null;
+  [key: string]: unknown;
+}
+
+/**
+ * Resolve `(contact_id, name, active_lead_id, follow_up_disabled)` a partir de
+ * um phone. 1 query com LEFT JOIN — devolve `null` quando phone não existe;
+ * devolve `{lead_id: null}` quando o contato não tem lead OPEN.
+ */
+async function resolveContactByPhoneForReactivation(
+  phone: string,
+): Promise<ContactPhoneResolveRow | null> {
+  const rows = await db.execute<ContactPhoneResolveRow>(sql`
+    SELECT
+      c.id::text                          AS contact_id,
+      c.name                              AS contact_name,
+      l.id::text                          AS lead_id,
+      l.follow_up_disabled                AS lead_follow_up_disabled
+    FROM contact_phones cp
+    JOIN contacts c       ON c.id = cp.contact_id
+    LEFT JOIN LATERAL (
+      SELECT id, follow_up_disabled
+        FROM leads
+       WHERE contact_id = c.id
+         AND status = 'OPEN'
+       ORDER BY last_activity_at DESC
+       LIMIT 1
+    ) l ON true
+    WHERE cp.phone = ${phone}
+    LIMIT 1
+  `);
+  const arr = Array.from(rows) as ContactPhoneResolveRow[];
+  return arr.length > 0 ? arr[0] : null;
+}
 
 /** Comandos liberados para QUALQUER phone durante o hardening local.
  *  FIXME(testing): voltar para admin-only antes de produção (mover `limpar`
@@ -534,6 +589,124 @@ export const adminRouter: Hook = {
       return {
         shortCircuit: true,
         response: `✅ Lead ${sid} devolvido à IA. A IA voltou a responder normalmente neste lead.\n\nUse /assumi ${sid} para reassumir.`,
+      };
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // /reativar-followup <phone> (feature follow-up-pendente, Bloco 6)
+    // ─────────────────────────────────────────────────────────────────────
+
+    if (command === 'reativar-followup') {
+      // (1) validação de uso.
+      if (!argsRaw) {
+        return {
+          shortCircuit: true,
+          response:
+            `Uso: /reativar-followup <phone>\n\n` +
+            `Phone no formato Zapster (sem '+', ex: 5519997124472).`,
+        };
+      }
+      const phone = argsRaw.trim();
+      if (!PHONE_REGEX.test(phone)) {
+        return {
+          shortCircuit: true,
+          response: `❌ Formato inválido: "${phone}". Use dígitos contínuos sem '+' (ex: 5519997124472).`,
+        };
+      }
+
+      // (2) resolve contato + lead OPEN mais recente.
+      const resolved = await resolveContactByPhoneForReactivation(phone);
+      if (!resolved) {
+        ctx.eventBus.emit(
+          'admin_command_executed',
+          {
+            command,
+            by_phone: ctx.contact.phone,
+            target_phone: phone,
+            outcome: 'contact_not_found',
+          },
+          'info',
+        );
+        return {
+          shortCircuit: true,
+          response: `❌ Contato não encontrado para o número ${phone}.`,
+        };
+      }
+
+      if (!resolved.lead_id) {
+        ctx.eventBus.emit(
+          'admin_command_executed',
+          {
+            command,
+            by_phone: ctx.contact.phone,
+            target_phone: phone,
+            target_contact_id: resolved.contact_id,
+            outcome: 'no_open_lead',
+          },
+          'info',
+        );
+        return {
+          shortCircuit: true,
+          response: `⚠️ Contato ${resolved.contact_name ?? phone} não tem lead aberto. Nada a reativar.`,
+        };
+      }
+
+      // (3) idempotente: já está habilitado.
+      if (resolved.lead_follow_up_disabled === false) {
+        ctx.eventBus.emit(
+          'admin_command_executed',
+          {
+            command,
+            by_phone: ctx.contact.phone,
+            target_phone: phone,
+            target_contact_id: resolved.contact_id,
+            target_lead_id: resolved.lead_id,
+            outcome: 'already_enabled',
+          },
+          'info',
+        );
+        return {
+          shortCircuit: true,
+          response: `ℹ️ Follow-ups de ${resolved.contact_name ?? phone} já estavam ativos. Nada mudou.`,
+        };
+      }
+
+      // (4) UPDATE leads.follow_up_disabled = false (UMA lead — a aberta mais recente).
+      await db.execute(sql`
+        UPDATE leads
+           SET follow_up_disabled = false,
+               updated_at         = now()
+         WHERE id = ${resolved.lead_id}::uuid
+      `);
+
+      ctx.eventBus.emit(
+        'follow_up_reactivated',
+        {
+          phone,
+          lead_id: resolved.lead_id,
+          contact_id: resolved.contact_id,
+          by_admin_phone: ctx.contact.phone,
+        },
+        'info',
+      );
+      ctx.eventBus.emit(
+        'admin_command_executed',
+        {
+          command,
+          by_phone: ctx.contact.phone,
+          target_phone: phone,
+          target_contact_id: resolved.contact_id,
+          target_lead_id: resolved.lead_id,
+          outcome: 'reactivated',
+        },
+        'info',
+      );
+
+      return {
+        shortCircuit: true,
+        response:
+          `✅ Follow-ups reativados para ${resolved.contact_name ?? phone} (${phone}). ` +
+          `Próximo ciclo do cron pode enviar nova tentativa quando o lead estiver dentro das regras.`,
       };
     }
 
