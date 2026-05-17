@@ -32,7 +32,10 @@ import {
   detectarCategoriaPorRegex,
   extrairUltimaPergunta,
 } from '../src/utils/follow-up-question';
-import { renderFollowUpMessage } from '../src/templates/follow-up-message';
+import {
+  isFallbackName,
+  renderFollowUpMessage,
+} from '../src/templates/follow-up-message';
 import {
   canSendFollowUp,
   isWithinBusinessHours,
@@ -166,6 +169,24 @@ function scenarioC1(): void {
     out5 === 'Oi Maria! Conseguiu pensar sobre quantos convidados você espera? Essa informação vai me ajudar a preparar tudo certinho para você 😊',
     'renderFollowUpMessage(generico) interpola pergunta_extraida + prefixo',
     out5,
+  );
+
+  // C1.6: hotfix UX — nomes "fallback" omitem o nome (usa "Oi!" puro).
+  assert(isFallbackName('WhatsApp 5519997124472') === true, 'isFallbackName("WhatsApp 5519...") = true (Zapster default)');
+  assert(isFallbackName('5519997124472') === true, 'isFallbackName("5519997124472") = true (só dígitos)');
+  assert(isFallbackName('') === true, 'isFallbackName("") = true (vazio)');
+  assert(isFallbackName('Maria') === false, 'isFallbackName("Maria") = false (nome real)');
+  assert(isFallbackName(null) === true, 'isFallbackName(null) = true');
+
+  const outFallback = renderFollowUpMessage({
+    contactName: 'WhatsApp 5519997124472',
+    categoria: 'tipo_evento',
+    templates: TEMPLATES_LITERAIS,
+  });
+  assert(
+    outFallback.startsWith('Oi! Então,'),
+    'renderFollowUpMessage(fallback name) = "Oi! Então..." (sem nome artificial)',
+    outFallback.slice(0, 30),
   );
 
   endScenario();

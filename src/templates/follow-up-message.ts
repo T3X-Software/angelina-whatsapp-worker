@@ -37,16 +37,41 @@ export interface RenderFollowUpMessageInput {
 }
 
 /**
+ * Detecta nomes "fallback" que o sistema usa quando o contato não tem nome real
+ * cadastrado. Nesses casos o renderer omite o nome (usa "Oi!" puro) para evitar
+ * outputs artificiais tipo "Oi WhatsApp 5519997124472!".
+ *
+ * Padrões reconhecidos como fallback:
+ *   - Vazio / só whitespace
+ *   - Começa com "WhatsApp" (padrão default do Zapster quando push name não vem)
+ *   - Apenas dígitos (phone gravado como name)
+ *
+ * Função pura.
+ */
+export function isFallbackName(name: string | null | undefined): boolean {
+  if (!name) return true;
+  const trimmed = name.trim();
+  if (trimmed.length === 0) return true;
+  if (/^WhatsApp\b/i.test(trimmed)) return true;
+  if (/^\d+$/.test(trimmed)) return true;
+  return false;
+}
+
+/**
  * Monta a mensagem final de follow-up: `Oi {nome}! ` + texto da categoria.
  *
  * - `generico`: interpola `{{pergunta_extraida}}` no texto antes de prefixar.
  * - Demais categorias: usa o texto literal sem interpolação.
+ * - Quando `contactName` é fallback (vazio, "WhatsApp ...", só dígitos), o
+ *   prefixo vira `Oi! ` puro (sem nome) para evitar UX artificial.
  *
  * Função pura — sem I/O.
  */
 export function renderFollowUpMessage(input: RenderFollowUpMessageInput): string {
   const { contactName, categoria, perguntaExtraida, templates } = input;
-  const prefixo = `Oi ${contactName.trim()}! `;
+  const prefixo = isFallbackName(contactName)
+    ? 'Oi! '
+    : `Oi ${contactName.trim()}! `;
 
   if (categoria === 'generico') {
     const interpolado = interpolateTemplate(templates.generico, {
