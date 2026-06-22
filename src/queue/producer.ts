@@ -16,8 +16,10 @@
 //      automática contra retransmits do Zapster (mesma message_id → mesmo
 //      jobId → BullMQ retorna o existente sem duplicar). Mirror do UNIQUE
 //      em `messages.zapster_message_id`.
-//   3. **Delay = bucketSize (~2.5s)**. O consumer só fira após esse atraso,
-//      dando tempo para mais webhooks do contato chegarem.
+//   3. **Delay = bucket_ms** (configurável via `hook_params.debounce.bucket_ms`,
+//      default 2.5s — Feature A 1.1). O consumer só fira após esse atraso,
+//      dando tempo para mais webhooks do contato chegarem. O TTL da LIST escala
+//      junto: `max(4× bucket, 10s)`.
 //   4. **Consolidação no consumer**: o PRIMEIRO job a rodar para um contato
 //      em burst dreniza a LIST inteira via `drainBucket(phone)` e processa
 //      tudo como UM turno. Os jobs irmãos do mesmo burst chegam logo depois,
@@ -31,7 +33,14 @@ import { Queue, type JobsOptions } from 'bullmq';
 
 import type { WebhookPayload } from '../edge/payload';
 import { getRedis } from './connection';
-import { appendToBucket, bucketSize } from './debouncer';
+import {
+  appendToBucket,
+  resolveBucketMs,
+  deriveBucketTtlMs,
+  DEFAULT_BUCKET_MS,
+} from './debouncer';
+import { findActiveByKey } from '../config/agent-configs';
+import type { DebounceConfig } from '../config/types';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tipos
@@ -122,10 +131,32 @@ export async function enqueueInbound(
   // retransmits + nunca colide com jobs anteriores do mesmo contato.
   const jobId = `lua-msg-${zapsterMessageId}`;
 
+  // Feature A (1.1) — debounce configurável. Lê `hook_params.debounce.bucket_ms`
+  // DIRETO de agent_configs (cache 30s) porque aqui, no enqueue (webhook), ainda
+  // NÃO existe HarnessContext. Fail-safe: qualquer erro → default 2500ms.
+  let bucketMs = DEFAULT_BUCKET_MS;
+  try {
+    const agentConfig = await findActiveByKey('angelina');
+    const rawBucket = (
+      agentConfig?.hookParams as { debounce?: DebounceConfig } | null | undefined
+    )?.debounce?.bucket_ms;
+    bucketMs = resolveBucketMs(rawBucket);
+  } catch (err) {
+    logger.warn(
+      {
+        event: 'debounce_config_read_failed',
+        err: err instanceof Error ? err.message : String(err),
+        phone,
+      },
+      'Falha lendo debounce.bucket_ms — usando default 2500',
+    );
+  }
+  const ttlMs = deriveBucketTtlMs(bucketMs);
+
   // 1. Acumula payload na LIST per-phone (consolidação no consumer).
   const redis = getRedis();
   try {
-    await appendToBucket(redis, phone, { payload, headers });
+    await appendToBucket(redis, phone, { payload, headers }, ttlMs);
   } catch (err) {
     logger.error(
       {
@@ -145,7 +176,7 @@ export async function enqueueInbound(
   const jobData: InboundJobData = { phone, payload, headers };
   const jobOpts: JobsOptions = {
     jobId,
-    delay: bucketSize, // janela de consolidação (~2.5s)
+    delay: bucketMs, // janela de consolidação (configurável — Feature A 1.1)
     // attempts/backoff/removeOn* herdam de defaultJobOptions
   };
 
@@ -158,7 +189,7 @@ export async function enqueueInbound(
         phone,
         zapster_message_id: zapsterMessageId,
         message_type: payload.data.message.type,
-        delay_ms: bucketSize,
+        delay_ms: bucketMs,
       },
       `enqueued zapster_message_id=${zapsterMessageId} jobId=${jobId}`,
     );

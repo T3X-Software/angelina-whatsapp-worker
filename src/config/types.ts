@@ -246,3 +246,21 @@ export interface FollowUpConfig {
 export interface FollowUpHookParams {
   follow_up?: FollowUpConfig;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Debounce (Feature A — item 1.1)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Sub-objeto `agent_configs.hook_params.debounce`.
+ *
+ * Consumido por `queue/producer.ts` no enqueue do webhook — lido DIRETO via
+ * `findActiveByKey('angelina')` porque ali ainda não existe HarnessContext.
+ *
+ * `bucket_ms` = janela de consolidação do debounce (default seguro 2500 quando
+ * ausente/inválido). O TTL da LIST Redis é derivado: `max(4× bucket, 10s)`
+ * (ver `deriveBucketTtlMs` em `queue/debouncer.ts`).
+ */
+export interface DebounceConfig {
+  bucket_ms: number;
+}

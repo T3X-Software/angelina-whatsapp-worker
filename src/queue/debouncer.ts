@@ -6,7 +6,8 @@
 //    via `appendToBucket(phone)` (RPUSH + PEXPIRE 10s).
 //  - Cada webhook gera 1 job BullMQ próprio (jobId atrelado ao
 //    `zapster_message_id` no producer — ver `producer.ts`).
-//  - Todos os jobs daquele contato são `delay = bucketSize` (~2.5s).
+//  - Todos os jobs daquele contato são `delay = bucket_ms` (configurável,
+//    default ~2.5s — Feature A 1.1).
 //  - Quando o PRIMEIRO job dispara, o consumer chama `drainBucket(phone)`
 //    e drena a LIST inteira de uma vez — todos os payloads acumulados
 //    durante a janela viram UM turno consolidado.
@@ -30,14 +31,34 @@ import type { Redis as IORedisInstance } from 'ioredis';
 // Constantes públicas
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Janela de silêncio em ms — debounce só dispara após esse tempo sem novas
- *  mensagens do mesmo contato. */
-export const bucketSize = 2500;
+/** Janela de silêncio (ms) DEFAULT — usada quando
+ *  `hook_params.debounce.bucket_ms` está ausente/inválido. */
+export const DEFAULT_BUCKET_MS = 2500;
 
-/** TTL default (ms) da LIST Redis. Maior que `bucketSize` para garantir que
- *  o consumer drena antes de o Redis expirar mesmo se a janela for estendida
- *  uma vez. 10s = 4× o bucket. */
-export const defaultBucketTtlMs = 10_000;
+/** Piso do TTL da LIST Redis (ms). O TTL real é `max(4× bucket, este piso)`,
+ *  garantindo folga para o drain mesmo com bucket pequeno. */
+export const MIN_BUCKET_TTL_MS = 10_000;
+
+/** TTL default da LIST quando `appendToBucket` é chamado sem `ttlMs` explícito. */
+export const defaultBucketTtlMs = MIN_BUCKET_TTL_MS;
+
+/**
+ * Feature A (1.1) — resolve `bucket_ms` vindo da config (JSONB, pode vir
+ * malformado). Default seguro 2500; ignora não-número ou ≤0.
+ */
+export function resolveBucketMs(raw: unknown): number {
+  return typeof raw === 'number' && Number.isFinite(raw) && raw > 0
+    ? raw
+    : DEFAULT_BUCKET_MS;
+}
+
+/**
+ * Feature A (1.1) — TTL da LIST derivado do bucket: `max(4× bucket, piso 10s)`.
+ * Preserva a invariante "TTL >> janela de consolidação" mesmo se o bucket subir.
+ */
+export function deriveBucketTtlMs(bucketMs: number): number {
+  return Math.max(4 * bucketMs, MIN_BUCKET_TTL_MS);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers de chave
