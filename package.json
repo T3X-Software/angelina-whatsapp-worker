@@ -12,7 +12,8 @@
     "db:pull": "drizzle-kit pull",
     "embeddings:backfill": "tsx scripts/embeddings-backfill.ts",
     "embeddings:rebuild": "tsx scripts/embeddings-backfill.ts",
-    "smoke:insights": "tsx scripts/smoke-insights.ts"
+    "smoke:insights": "tsx scripts/smoke-insights.ts",
+    "smoke:notif": "tsx scripts/smoke-notification-targets.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.92.0",

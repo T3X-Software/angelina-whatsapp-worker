@@ -36,9 +36,11 @@
 //   7. send 4 (Juliano) — se support_whatsapp não vazio
 // Se 6 ou 7 falham, NÃO revertemos (Sergio confirma; emite warn `handoff_partial`).
 //
-// Edge case `support_whatsapp=''` (Bloco 1 deixou em branco até Bloco 13):
-//   - Emite warn `support_whatsapp_unset`. NÃO envia para Juliano (passo 4).
-//   - Demais passos (1, 2 cliente, 3, 5) acontecem normalmente.
+// Feature C (item 3.1): passo 4 envia para TODOS os `hook_params.notification_targets`
+// (E.164, normalizados + deduplicados). Lista vazia → fallback `support_whatsapp`.
+// Ambos vazios → warn `handoff_notification_targets_empty` e NÃO envia; demais
+// passos (1, 2 cliente, 3, 5) acontecem normalmente. Falha de um alvo não impede
+// os outros (cada send tem seu try/catch → `handoff_partial`).
 
 import { sql } from 'drizzle-orm';
 
@@ -49,6 +51,7 @@ import { interpolateTemplate } from '../utils/template';
 import { humanizeEventType } from '../utils/event-type';
 import { formatPhone } from '../utils/phone';
 import { getLeadHandoffState } from '../utils/assisted-mode';
+import { resolveNotificationTargets } from '../utils/notification-targets';
 
 interface HookParamsShape {
   transfer_message?: string;
@@ -59,10 +62,22 @@ interface HookParamsShape {
    * interesse, acao_sugerida.
    */
   handoff_support_message_template?: string;
+  /**
+   * Feature C (item 3.1) — números E.164 que recebem a notificação de handoff.
+   * A plataforma grava (toggle "recebe notificação do agente" por usuário).
+   * Vazio/ausente → fallback para `support_whatsapp` (comportamento legado).
+   * O primeiro alvo vira `tasks.assigned_to_phone` (âncora do webhook, Bloco 9).
+   */
+  notification_targets?: string[];
 }
 
 const DEFAULT_TRANSFER_MESSAGE =
   'Perfeito, vou te conectar com um especialista agora 👌';
+
+/** Redact de telefone para tracing: 4 primeiros + *** + 2 últimos. */
+function redactPhone(p: string): string {
+  return p.length <= 6 ? '***' : `${p.slice(0, 4)}***${p.slice(-2)}`;
+}
 
 /**
  * Detecta se o handoff deve ser disparado neste turno. Aciona quando:
@@ -246,6 +261,11 @@ export function createTransferTriggerHook(client: ZapsterClient): Hook {
       const supportTemplate = params.handoff_support_message_template;
       const supportWhatsapp = ctx.config?.supportWhatsapp ?? '';
 
+      // Feature C (3.1) — resolve os alvos de notificação (N números E.164),
+      // com fallback para `support_whatsapp` quando `notification_targets` vazio.
+      const { targets: notificationTargets, source: notificationTargetsSource } =
+        resolveNotificationTargets(params.notification_targets, supportWhatsapp);
+
       // Bloco 3 — args opcionais vindos do Claude via tool `transfer_to_human`.
       const { interestSummary, suggestedAction } = extractInterestArgs(ctx);
 
@@ -339,10 +359,11 @@ export function createTransferTriggerHook(client: ZapsterClient): Hook {
           // Quando `support_whatsapp` é vazio/null, persiste NULL — task ainda
           // é criada mas o detection do webhook não vincula (caso degradado
           // aceito; tasks legacy pré-Bloco-9 ficam sem vinculação automática).
-          const supportPhoneForTask =
-            supportWhatsapp && supportWhatsapp.trim() !== ''
-              ? supportWhatsapp.trim()
-              : null;
+          // Feature C (3.1): âncora = primeiro alvo de notificação (antes era só
+          // `support_whatsapp`). Mantém a vinculação do webhook (Bloco 9) num
+          // número estável; os demais alvos recebem a notificação mas não são
+          // âncora de vinculação.
+          const supportPhoneForTask = notificationTargets[0] ?? null;
           const taskRows = await tx.execute<{ id: string }>(sql`
             INSERT INTO tasks (
               lead_id, contact_id, title, type, priority, status,
@@ -431,18 +452,19 @@ export function createTransferTriggerHook(client: ZapsterClient): Hook {
       // Bloco 3: usa `agent_configs.hook_params.handoff_support_message_template`
       // interpolado via `interpolateTemplate`. Se ausente, fallback para texto
       // legacy hardcoded (preserva comportamento de v2).
-      let supportSent = false;
       let supportTextRendered = '';
       let supportTemplateUsed: 'configured' | 'legacy_fallback' | 'skipped' =
         'skipped';
+      let supportSentCount = 0;
+      const supportFailedTargets: string[] = [];
 
-      if (!supportWhatsapp || supportWhatsapp.trim() === '') {
+      if (notificationTargets.length === 0) {
         ctx.eventBus.emit(
-          'support_whatsapp_unset',
+          'handoff_notification_targets_empty',
           {
             lead_id: leadId,
             reason:
-              'agent_configs.support_whatsapp is empty — skipping support notification',
+              'notification_targets e support_whatsapp ambos vazios — nenhuma notificação enviada',
           },
           'med',
         );
@@ -507,24 +529,30 @@ export function createTransferTriggerHook(client: ZapsterClient): Hook {
           supportTemplateUsed = 'legacy_fallback';
         }
 
-        try {
-          await client.send({
-            recipientId: supportWhatsapp,
-            recipientType: 'chat',
-            text: supportTextRendered,
-          });
-          supportSent = true;
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          ctx.eventBus.emit(
-            'handoff_partial',
-            {
-              step: 'send_support',
-              message,
-              lead_id: leadId,
-            },
-            'high',
-          );
+        // Feature C (3.1) — loop de send: mesmo texto para todos os alvos.
+        // Falha em um alvo NÃO impede os demais (cada um com seu try/catch).
+        for (const target of notificationTargets) {
+          try {
+            await client.send({
+              recipientId: target,
+              recipientType: 'chat',
+              text: supportTextRendered,
+            });
+            supportSentCount += 1;
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            supportFailedTargets.push(target);
+            ctx.eventBus.emit(
+              'handoff_partial',
+              {
+                step: 'send_support',
+                target_redacted: redactPhone(target),
+                message,
+                lead_id: leadId,
+              },
+              'high',
+            );
+          }
         }
       }
 
@@ -537,7 +565,11 @@ export function createTransferTriggerHook(client: ZapsterClient): Hook {
           task_id: taskId,
           timeline_event_id: timelineEventId,
           client_sent: clientSent,
-          support_sent: supportSent,
+          support_sent: supportSentCount > 0,
+          support_sent_count: supportSentCount,
+          notification_targets_count: notificationTargets.length,
+          notification_targets_source: notificationTargetsSource,
+          support_failed_count: supportFailedTargets.length,
           support_template_used: supportTemplateUsed,
           interest_summary_set: interestSummary != null,
           suggested_action_set: suggestedAction != null,
