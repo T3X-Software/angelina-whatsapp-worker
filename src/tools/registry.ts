@@ -26,6 +26,7 @@ import { saveLeadInfoTool } from './save-lead-info';
 import { classifyLeadTool } from './classify-lead';
 import { transferToHumanTool } from './transfer-to-human';
 import { rememberFactTool } from './remember-fact';
+import { checkBlockedDatesTool } from './check-blocked-dates';
 
 /**
  * Lista canônica de TODAS as tools conhecidas pelo worker.
@@ -43,6 +44,7 @@ export const ALL_TOOLS: ReadonlyArray<AnyTool> = [
   classifyLeadTool,
   transferToHumanTool,
   rememberFactTool,
+  checkBlockedDatesTool, // Feature 1.11 — read-only
 ] as const;
 
 /**
