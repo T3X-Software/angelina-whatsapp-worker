@@ -59,7 +59,11 @@
 
 import type { HarnessContext } from '../harness/types';
 import type { LLMMessage } from '../llm/types';
-import type { HandoffContinuityHookParams } from '../config/types';
+import type {
+  HandoffContinuityHookParams,
+  PromptBlocksConfig,
+} from '../config/types';
+import { assembleSystemBlocks } from '../utils/prompt-blocks';
 import { isPlaceholderContactName } from '../contacts/resolveContact';
 import { loadLastN } from './l1-conversation';
 import { buildSummary } from './l2-summary';
@@ -94,7 +98,16 @@ export interface ComposedPrompt {
 const DEFAULT_LAST_N = 15;
 
 export async function compose(ctx: HarnessContext): Promise<ComposedPrompt> {
-  const baseSystem = ctx.config?.systemPrompt ?? '';
+  // Feature B (1.2/1.3) — prompt modular. Se `hook_params.prompt` tiver blocos
+  // preenchidos, monta o system na ORDEM FIXA (identidade → saudacao →
+  // tom_de_voz → objetivo → regras_duras → base_estabelecimento). Senão,
+  // fallback para o campo único `system_prompt` (hoje é o que está em uso).
+  const promptBlocks = assembleSystemBlocks(
+    (ctx.config?.hookParams as { prompt?: PromptBlocksConfig } | undefined)
+      ?.prompt,
+  );
+  const baseSystem =
+    promptBlocks.length > 0 ? promptBlocks : (ctx.config?.systemPrompt ?? '');
 
   // Lê L1 + L2 em paralelo (independentes).
   const [l1, l2] = await Promise.all([

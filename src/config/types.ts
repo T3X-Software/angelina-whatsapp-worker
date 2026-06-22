@@ -264,3 +264,28 @@ export interface FollowUpHookParams {
 export interface DebounceConfig {
   bucket_ms: number;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Prompt modular (Feature B — itens 1.2 / 1.3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Sub-objeto `agent_configs.hook_params.prompt` — blocos nomeados do system
+ * prompt. Consumido por `memory/composer.ts` via `assembleSystemBlocks`, que
+ * concatena na ORDEM FIXA: identidade → saudacao → tom_de_voz → objetivo →
+ * regras_duras → base_estabelecimento.
+ *
+ * CONTRATO COM A PLATAFORMA: o editor de blocos do dev deve gravar EXATAMENTE
+ * estas chaves. Quando nenhum bloco está preenchido, o composer faz fallback
+ * para a coluna `system_prompt` (comportamento legado, hoje em uso).
+ *
+ * `saudacao` (1.3) e `tom_de_voz` (1.2) são apenas blocos — sem lógica especial.
+ */
+export interface PromptBlocksConfig {
+  identidade?: string;
+  saudacao?: string;
+  tom_de_voz?: string;
+  objetivo?: string;
+  regras_duras?: string;
+  base_estabelecimento?: string;
+}

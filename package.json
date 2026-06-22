@@ -14,7 +14,8 @@
     "embeddings:rebuild": "tsx scripts/embeddings-backfill.ts",
     "smoke:insights": "tsx scripts/smoke-insights.ts",
     "smoke:notif": "tsx scripts/smoke-notification-targets.ts",
-    "smoke:debounce": "tsx scripts/smoke-debounce.ts"
+    "smoke:debounce": "tsx scripts/smoke-debounce.ts",
+    "smoke:prompt": "tsx scripts/smoke-prompt-blocks.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.92.0",
