@@ -62,8 +62,13 @@ import type { LLMMessage } from '../llm/types';
 import type {
   HandoffContinuityHookParams,
   PromptBlocksConfig,
+  EventUrgencyConfig,
 } from '../config/types';
 import { assembleSystemBlocks } from '../utils/prompt-blocks';
+import {
+  deriveEventUrgency,
+  resolveUrgencyThresholds,
+} from '../utils/event-urgency';
 import { isPlaceholderContactName } from '../contacts/resolveContact';
 import { loadLastN } from './l1-conversation';
 import { buildSummary } from './l2-summary';
@@ -124,7 +129,28 @@ export async function compose(ctx: HarnessContext): Promise<ComposedPrompt> {
   if (l2.length > 0) {
     sections.push('## Sumário do contato', l2);
   }
-  sections.push('## Contexto temporal', `Agora: ${formatNowBR()}`);
+  // Feature 1.6 (ADR 0001) — bloco temporal + proximidade do evento, DERIVADA
+  // de `event_date` (não persiste). Faixas configuráveis em
+  // `hook_params.event_urgency.thresholds_days` (default 7/30). Sem data /
+  // data passada → não injeta. Nomes (IMEDIATO/PROXIMO/PLANEJADO) batem com o
+  // selo de esforço da plataforma.
+  const nowBR = formatNowBR();
+  const temporalParts = [`Agora: ${nowBR}`];
+  const urgency = deriveEventUrgency(
+    ctx.lead?.eventDate ?? null,
+    nowBR.slice(0, 10),
+    resolveUrgencyThresholds(
+      (ctx.config?.hookParams as { event_urgency?: EventUrgencyConfig } | undefined)
+        ?.event_urgency?.thresholds_days,
+    ),
+  );
+  if (urgency) {
+    temporalParts.push(
+      `Proximidade do evento: ${urgency} (data ${ctx.lead?.eventDate}). ` +
+        `Quanto mais próximo, mais prioridade para agendar a visita.`,
+    );
+  }
+  sections.push('## Contexto temporal', temporalParts.join('\n'));
 
   const contactSection = renderContact(ctx.contact);
   if (contactSection.length > 0) {

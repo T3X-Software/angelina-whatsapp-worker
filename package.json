@@ -16,7 +16,8 @@
     "smoke:notif": "tsx scripts/smoke-notification-targets.ts",
     "smoke:debounce": "tsx scripts/smoke-debounce.ts",
     "smoke:prompt": "tsx scripts/smoke-prompt-blocks.ts",
-    "smoke:blocked": "tsx scripts/smoke-blocked-dates.ts"
+    "smoke:blocked": "tsx scripts/smoke-blocked-dates.ts",
+    "smoke:urgency": "tsx scripts/smoke-event-urgency.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.92.0",

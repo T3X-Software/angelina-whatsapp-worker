@@ -289,3 +289,25 @@ export interface PromptBlocksConfig {
   regras_duras?: string;
   base_estabelecimento?: string;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Proximidade do evento (Feature 1.6 — ADR 0001)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Sub-objeto `agent_configs.hook_params.event_urgency`.
+ *
+ * Faixas (em dias até o evento) que classificam a proximidade — DERIVADA de
+ * `leads.event_date`, nunca persistida (ADR 0001). Consumido por
+ * `memory/composer.ts` via `deriveEventUrgency`.
+ *
+ * `thresholds_days.imediato` e `.proximo`: `≤imediato → IMEDIATO`,
+ * `≤proximo → PROXIMO`, acima → `PLANEJADO`. Default seguro `{imediato:7, proximo:30}`.
+ * Os nomes batem com a matriz de selo de esforço da plataforma (porte × urgência).
+ */
+export interface EventUrgencyConfig {
+  thresholds_days: {
+    imediato: number;
+    proximo: number;
+  };
+}
