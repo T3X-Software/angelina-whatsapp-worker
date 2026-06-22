@@ -27,6 +27,9 @@ import { attachDLQHandler } from './queue/dlq-handler';
 import { closeDb } from './db/client';
 import { ZapsterClient } from './zapster/client';
 import { startFollowUpCron } from './jobs/follow-up-checker';
+import { registerInsightsTriggerRoute } from './edge/insights-trigger';
+import { startInsightsCron } from './jobs/insights-analyst';
+import { sweepStaleRuns } from './insights/repository';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Logger
@@ -52,6 +55,7 @@ const logger = pino({
 let server: FastifyInstance | null = null;
 let bullWorker: Worker | null = null;
 let followUpCronHandle: NodeJS.Timeout | null = null;
+let insightsCronHandle: NodeJS.Timeout | null = null;
 let shuttingDown = false;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -63,6 +67,9 @@ async function startHttpServer(): Promise<FastifyInstance> {
 
   // Acopla as rotas reais do webhook Zapster (Bloco 2).
   registerWebhookRoutes(app);
+
+  // Rota interna do analista de conversas (on-demand, disparada pelo web).
+  registerInsightsTriggerRoute(app);
 
   await startServer(app, env.LUA_HTTP_PORT);
   logger.info({ port: env.LUA_HTTP_PORT }, 'HTTP server listening');
@@ -98,6 +105,17 @@ async function shutdown(signal: string): Promise<void> {
       logger.info('Follow-up cron interval cleared');
     } catch (err) {
       logger.error({ err }, 'Error clearing follow-up cron');
+    }
+  }
+
+  // Para o cron do analista de conversas (mesma semântica do follow-up).
+  if (insightsCronHandle) {
+    try {
+      clearInterval(insightsCronHandle);
+      insightsCronHandle = null;
+      logger.info('Insights analyst cron interval cleared');
+    } catch (err) {
+      logger.error({ err }, 'Error clearing insights cron');
     }
   }
 
@@ -178,6 +196,17 @@ async function main(): Promise<void> {
     zapsterClient: zapsterClientForCron,
     logger,
   });
+
+  // 5. Analista de conversas (feature conversation-insights).
+  // Cron paralelo, read-only, separado da HarnessLoop. Sweep de runs órfãs
+  // 'running' (worker pode ter reiniciado no meio de uma run) antes de agendar.
+  try {
+    const swept = await sweepStaleRuns(30);
+    if (swept > 0) logger.info({ event: 'insights_stale_runs_swept', swept }, 'swept stale insight runs');
+  } catch (err) {
+    logger.error({ err }, 'Error sweeping stale insight runs');
+  }
+  insightsCronHandle = await startInsightsCron({ logger });
 
   logger.info('whatsapp-worker ready');
 }

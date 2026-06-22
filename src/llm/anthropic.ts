@@ -226,6 +226,13 @@ export interface CallClaudeArgs {
    * permite correlacionar custos e tokens por iteração no painel.
    */
   iteration?: number;
+  /**
+   * Força (ou orienta) a escolha de tool pelo modelo. Aditivo e
+   * retrocompatível: quando omitido, o SDK usa o default (`auto`) — exatamente
+   * o comportamento da harness. Usado pelo agente analista para FORÇAR a tool
+   * de saída estruturada (`{ type: 'tool', name: 'report_insights' }`).
+   */
+  toolChoice?: Anthropic.MessageCreateParams['tool_choice'];
 }
 
 export async function callClaude(
@@ -240,6 +247,7 @@ export async function callClaude(
     maxTokens = 4096,
     eventBus,
     iteration,
+    toolChoice,
   } = args;
 
   // ── Caching: marca system_prompt + último tool quando elegíveis ─────────
@@ -284,6 +292,7 @@ export async function callClaude(
     system: systemBlocks,
     messages: sdkMessages,
     ...(sdkTools.length > 0 ? { tools: sdkTools } : {}),
+    ...(toolChoice ? { tool_choice: toolChoice } : {}),
   };
 
   // ── Trace start ─────────────────────────────────────────────────────────

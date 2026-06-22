@@ -45,6 +45,15 @@ const EnvSchema = z.object({
   LOG_LEVEL: z
     .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'])
     .default('info'),
+
+  // Secret bearer da rota interna POST /internal/insights/run (analista
+  // on-demand disparado pelo app web). OPCIONAL: se ausente, o endpoint
+  // on-demand fica desabilitado (503) — o cron do analista segue funcionando.
+  // Deve casar com INSIGHTS_TRIGGER_SECRET do app web.
+  INSIGHTS_TRIGGER_SECRET: z
+    .string()
+    .min(16, 'INSIGHTS_TRIGGER_SECRET deve ter ≥16 chars')
+    .optional(),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

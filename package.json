@@ -11,7 +11,8 @@
     "lint": "tsc --noEmit",
     "db:pull": "drizzle-kit pull",
     "embeddings:backfill": "tsx scripts/embeddings-backfill.ts",
-    "embeddings:rebuild": "tsx scripts/embeddings-backfill.ts"
+    "embeddings:rebuild": "tsx scripts/embeddings-backfill.ts",
+    "smoke:insights": "tsx scripts/smoke-insights.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.92.0",
