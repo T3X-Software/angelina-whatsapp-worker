@@ -18,7 +18,8 @@
     "smoke:prompt": "tsx scripts/smoke-prompt-blocks.ts",
     "smoke:blocked": "tsx scripts/smoke-blocked-dates.ts",
     "smoke:urgency": "tsx scripts/smoke-event-urgency.ts",
-    "smoke:payload-audio": "tsx scripts/smoke-payload-audio.ts"
+    "smoke:payload-audio": "tsx scripts/smoke-payload-audio.ts",
+    "smoke:transcribe": "tsx scripts/smoke-transcribe.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.92.0",

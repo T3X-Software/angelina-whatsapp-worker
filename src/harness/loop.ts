@@ -59,6 +59,11 @@ import { buildHookPipeline } from '../hooks';
 import { ZapsterClient } from '../zapster/client';
 import { sendWithStateMachine } from '../zapster/sender';
 import { getEnabledTools, getToolByName } from '../tools/registry';
+import {
+  transcribeAudio,
+  classifyInbound,
+  transcriptionUsable,
+} from '../utils/transcribe';
 import { callClaude } from '../llm/anthropic';
 import {
   LLMUnavailableError,
@@ -706,6 +711,45 @@ export async function run(
       eventBus: bus,
     };
 
+    // [9.5] Feature 1.8 — transcrição de áudio ANTES dos hooks.
+    // O composer (em load-context, último hook de BEFORE_REQUEST) monta o prompt
+    // a partir de `ctx.message.text`; por isso a transcrição precisa acontecer
+    // AQUI (não no gate [11.5], que roda depois do compose). Áudio com URL →
+    // Whisper → injeta o texto no turno. Falha/sem URL → cai no gate de resposta
+    // fixa. Trade-off aceito: roda antes do short-circuit de rate-limit (áudio +
+    // rate-limited é raro; custo Whisper ~$0.006/min). `transcribeAudio` nunca
+    // throwa. NÃO persiste a transcrição no banco (follow-up: gravar em
+    // messages.transcription para o L1 de turnos futuros).
+    let audioTranscribedOk = false;
+    {
+      const inbound = payload.data.message;
+      if (
+        classifyInbound(inbound.type, inbound.media?.url !== undefined) ===
+          'transcribe' &&
+        inbound.media?.url
+      ) {
+        const tr = await transcribeAudio(inbound.media.url, inbound.media.mime_type);
+        if (transcriptionUsable(tr)) {
+          ctx.message.text = (tr.text ?? '').trim();
+          audioTranscribedOk = true;
+          bus.emit(
+            'audio_transcribed',
+            {
+              chars: (tr.text ?? '').length,
+              duration_s: inbound.media.duration ?? null,
+            },
+            'info',
+          );
+        } else {
+          bus.emit(
+            'audio_transcribe_failed',
+            { reason: tr.error ?? 'empty', has_url: true },
+            'med',
+          );
+        }
+      }
+    }
+
     // [10] Hooks BEFORE_REQUEST.
     const beforeReq = await runPhase('BEFORE_REQUEST', ctx);
     if (beforeReq.shortCircuited) {
@@ -773,10 +817,10 @@ export async function run(
 
     // [11.5] Interceptação de áudio (e outras mídias) — Bloco 12 #63 / Q14.
     //
-    // Decisão de produto: a Angelina v1 NÃO transcreve áudio (Whisper fica
-    // para `harness-audio-transcribe`). Resposta fixa pede pra mandar por texto.
-    // Tudo que não é texto (audio, image, video, document, sticker, etc.) cai
-    // aqui — `media_url`/`media_type` já foram gravados em `claimMessage`.
+    // Feature 1.8: ÁUDIO com URL já foi transcrito em [9.5] (Whisper) e segue o
+    // fluxo normal — NÃO cai aqui (audioTranscribedOk=true). Este gate trata o
+    // RESTANTE: outras mídias (image/video/document/sticker) e áudio sem URL ou
+    // cuja transcrição falhou. Resposta fixa pede pra mandar por texto.
     //
     // Comportamento:
     //   - PULA LLM call e tools (custo $0).
@@ -786,7 +830,7 @@ export async function run(
     //
     // Usado também para outras mídias — texto da resposta é o mesmo.
     let interceptedFixedResponse = false;
-    if (payload.data.message.type !== 'text') {
+    if (payload.data.message.type !== 'text' && !audioTranscribedOk) {
       bus.emit(
         'audio_inbound_fixed_response',
         {
