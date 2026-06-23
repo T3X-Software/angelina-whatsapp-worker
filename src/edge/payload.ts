@@ -37,6 +37,18 @@ const RecipientSchema = z
   })
   .passthrough();
 
+// Metadados de mídia do Zapster (OpenAPI: AudioMediaMessage.media.metadata e
+// VideoMediaMessage.media.metadata). `ptt`/`duration` vêm em áudio; `ptv` em
+// vídeo. Tudo opcional + passthrough (Zapster pode adicionar campos).
+const MediaMetadataSchema = z
+  .object({
+    duration: z.number().optional(),
+    ptt: z.boolean().optional(),
+    ptv: z.boolean().optional(),
+  })
+  .passthrough()
+  .optional();
+
 // `media` é um objeto livre — pode vir vazio, parcial ou completo.
 // Em Zod 4 não existe `partial()` em `z.object().optional()` no padrão antigo;
 // usamos `.optional()` em todos os campos manualmente.
@@ -45,6 +57,7 @@ const MediaSchema = z
     url: z.string().optional(),
     mime_type: z.string().optional(),
     filename: z.string().optional(),
+    metadata: MediaMetadataSchema,
   })
   .passthrough()
   .optional();
@@ -100,9 +113,15 @@ const NestedPayloadSchema = z
 const FlatContentSchema = z
   .object({
     text: z.string().optional(),
+    // Campos planos legados (workflows n8n) — mantidos só como fallback.
     url: z.string().optional(),
     mime_type: z.string().optional(),
     filename: z.string().optional(),
+    // Envelope REAL do Zapster para mídia (OpenAPI: *MediaMessage):
+    // `content.media.{url, metadata}` + `content.view_once`. É AQUI que a URL
+    // de áudio/imagem/vídeo realmente chega — não no `content.url` plano.
+    view_once: z.boolean().optional(),
+    media: MediaSchema,
   })
   .passthrough()
   .optional();
@@ -131,6 +150,10 @@ export type WebhookMessageMedia = {
   url?: string;
   mime_type?: string;
   filename?: string;
+  // Metadados de áudio (push-to-talk + duração em s). Disponíveis em memória
+  // para a feature de transcrição (1.8); não há coluna dedicada no banco.
+  ptt?: boolean;
+  duration?: number;
 };
 
 export type WebhookMessage = {
@@ -186,6 +209,8 @@ export function parseWebhookPayload(body: unknown): ParseResult {
                   url: d.message.media.url,
                   mime_type: d.message.media.mime_type,
                   filename: d.message.media.filename,
+                  ptt: d.message.media.metadata?.ptt,
+                  duration: d.message.media.metadata?.duration,
                 }
               : undefined,
           },
@@ -199,6 +224,21 @@ export function parseWebhookPayload(body: unknown): ParseResult {
   const flat = FlatPayloadSchema.safeParse(body);
   if (flat.success) {
     const d = flat.data.data;
+    // A URL real do Zapster vem em `content.media.url` (OpenAPI *MediaMessage).
+    // Caímos para os campos planos legados (`content.url`) apenas como fallback
+    // de workflows n8n antigos. ptt/duration só existem no envelope `media`.
+    const mc = d.content?.media;
+    const mediaUrl = mc?.url ?? d.content?.url;
+    const mediaMime = mc?.mime_type ?? d.content?.mime_type;
+    const mediaFilename = mc?.filename ?? d.content?.filename;
+    const mediaPtt = mc?.metadata?.ptt;
+    const mediaDuration = mc?.metadata?.duration;
+    const hasMedia =
+      mediaUrl !== undefined ||
+      mediaMime !== undefined ||
+      mediaFilename !== undefined ||
+      mediaPtt !== undefined ||
+      mediaDuration !== undefined;
     return {
       success: true,
       data: {
@@ -209,14 +249,15 @@ export function parseWebhookPayload(body: unknown): ParseResult {
             id: d.id,
             type: d.type,
             text: d.content?.text,
-            media:
-              d.content && (d.content.url || d.content.mime_type || d.content.filename)
-                ? {
-                    url: d.content.url,
-                    mime_type: d.content.mime_type,
-                    filename: d.content.filename,
-                  }
-                : undefined,
+            media: hasMedia
+              ? {
+                  url: mediaUrl,
+                  mime_type: mediaMime,
+                  filename: mediaFilename,
+                  ptt: mediaPtt,
+                  duration: mediaDuration,
+                }
+              : undefined,
           },
         },
         raw: body,
