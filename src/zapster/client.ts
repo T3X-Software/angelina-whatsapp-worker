@@ -121,7 +121,8 @@ export class ZapsterClient {
     const body: SendRequest = SendRequestSchema.parse({
       instance_id: env.ZAPSTER_INSTANCE_ID,
       recipient: formatRecipient(input),
-      text: input.text,
+      ...(input.text ? { text: input.text } : {}),
+      ...(input.media ? { media: input.media } : {}),
     });
 
     const t0 = performance.now();
@@ -130,7 +131,8 @@ export class ZapsterClient {
       {
         recipient_redacted: redactRecipient(input.recipientId),
         recipient_type: input.recipientType,
-        text_len: input.text.length,
+        text_len: input.text?.length ?? 0,
+        has_media: input.media !== undefined,
       },
       'info',
     );

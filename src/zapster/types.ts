@@ -23,12 +23,35 @@ export type { WebhookPayload } from '../edge/payload';
  *     ou ID do grupo SEM o prefixo `group:` (o client adiciona ao montar
  *     o body). Convenção do projeto consolidada no Bloco 4 (E.164 sem `+`).
  *   - `recipientType`: define a forma final do `recipient` enviado à Zapster.
- *   - `text`: vai para `text` no body. (Futuro: media — fora do escopo.)
+ *   - `text`: vai para `text` no body. Opcional quando `media` está presente.
+ *   - `media`: mídia a enviar (Feature 1.9 — ADR 0003).
  */
+export interface MediaPayload {
+  /** URL pública da mídia (XOR com `base64`). */
+  url?: string;
+  /** Mídia em base64 (XOR com `url`). */
+  base64?: string;
+  /** Legenda (image/video/document). */
+  caption?: string;
+  /** Nome do arquivo (ex: PDF). */
+  fileName?: string;
+  /** Áudio como push-to-talk (default true na Zapster). */
+  ptt?: boolean;
+  /** Vídeo como video note. */
+  ptv?: boolean;
+  /** Vídeo em loop. */
+  playback?: boolean;
+  /** Imagem como sticker. */
+  sticker?: boolean;
+}
+
 export interface ZapsterSendInput {
   recipientId: string;
   recipientType: 'chat' | 'group';
-  text: string;
+  /** Texto da mensagem. Opcional quando `media` está presente (Feature 1.9). */
+  text?: string;
+  /** Mídia a enviar (Feature 1.9). Legenda via `media.caption`. */
+  media?: MediaPayload;
 }
 
 /**
@@ -52,11 +75,36 @@ export interface ZapsterSendResult {
  *     (montagem responsabilidade do client; aqui só validamos a string final).
  *   - `text`: conteúdo da mensagem.
  */
-export const SendRequestSchema = z.object({
-  instance_id: z.string().min(1),
-  recipient: z.string().min(1),
-  text: z.string().min(1),
-});
+/**
+ * Objeto `media` do body (Feature 1.9 — ADR 0003). Exatamente UM de `url`/`base64`.
+ */
+export const MediaPayloadSchema = z
+  .object({
+    url: z.string().url().optional(),
+    base64: z.string().min(1).optional(),
+    caption: z.string().optional(),
+    fileName: z.string().optional(),
+    ptt: z.boolean().optional(),
+    ptv: z.boolean().optional(),
+    playback: z.boolean().optional(),
+    sticker: z.boolean().optional(),
+  })
+  .refine((m) => (m.url !== undefined) !== (m.base64 !== undefined), {
+    message: 'media requer exatamente um de `url` ou `base64`',
+  });
+export type MediaPayloadWire = z.infer<typeof MediaPayloadSchema>;
+
+export const SendRequestSchema = z
+  .object({
+    instance_id: z.string().min(1),
+    recipient: z.string().min(1),
+    text: z.string().min(1).optional(),
+    media: MediaPayloadSchema.optional(),
+  })
+  .refine(
+    (b) => (b.text !== undefined && b.text.length > 0) || b.media !== undefined,
+    { message: 'send requer `text` ou `media`' },
+  );
 export type SendRequest = z.infer<typeof SendRequestSchema>;
 
 /**

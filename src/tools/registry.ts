@@ -27,6 +27,7 @@ import { classifyLeadTool } from './classify-lead';
 import { transferToHumanTool } from './transfer-to-human';
 import { rememberFactTool } from './remember-fact';
 import { checkBlockedDatesTool } from './check-blocked-dates';
+import { selectMediaTool } from './select-media';
 
 /**
  * Lista canônica de TODAS as tools conhecidas pelo worker.
@@ -45,6 +46,7 @@ export const ALL_TOOLS: ReadonlyArray<AnyTool> = [
   transferToHumanTool,
   rememberFactTool,
   checkBlockedDatesTool, // Feature 1.11 — read-only
+  selectMediaTool, // Feature 1.9 — read-only (envio é via hook media-sender, Commit 2)
 ] as const;
 
 /**

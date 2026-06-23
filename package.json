@@ -19,7 +19,9 @@
     "smoke:blocked": "tsx scripts/smoke-blocked-dates.ts",
     "smoke:urgency": "tsx scripts/smoke-event-urgency.ts",
     "smoke:payload-audio": "tsx scripts/smoke-payload-audio.ts",
-    "smoke:transcribe": "tsx scripts/smoke-transcribe.ts"
+    "smoke:transcribe": "tsx scripts/smoke-transcribe.ts",
+    "smoke:zapster-media": "tsx scripts/smoke-zapster-media.ts",
+    "smoke:select-media": "tsx scripts/smoke-select-media.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.92.0",
