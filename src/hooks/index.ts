@@ -25,6 +25,7 @@ import { formatWhatsapp } from './format-whatsapp';
 import { responseGuard } from './response-guard';
 import { createTransferTriggerHook } from './transfer-trigger';
 import { createHumanDelayHook } from './human-delay';
+import { createMediaSenderHook } from './media-sender';
 
 // Re-exports individuais (úteis para testes unitários e smokes).
 export { rateLimitGuard } from './rate-limit-guard';
@@ -34,6 +35,7 @@ export { formatWhatsapp, formatWhatsappText } from './format-whatsapp';
 export { responseGuard } from './response-guard';
 export { createTransferTriggerHook } from './transfer-trigger';
 export { createHumanDelayHook, computeHumanDelayMs } from './human-delay';
+export { createMediaSenderHook } from './media-sender';
 
 /**
  * BEFORE_REQUEST — ordem imutável (INVARIANTE 2: rate-limit-guard PRIMEIRO).
@@ -59,11 +61,13 @@ export function buildHookPipeline(client: ZapsterClient): {
   BEFORE_SEND: ReadonlyArray<Hook>;
 } {
   // AFTER_MODEL — ordem: transfer-trigger PRIMEIRO (HOT handoff), depois
-  // format-whatsapp. Se transfer fizer short-circuit, format NÃO roda — é o
-  // comportamento desejado (não há resposta a formatar).
+  // format-whatsapp, depois media-sender (Feature 1.9). Se transfer fizer
+  // short-circuit, os seguintes NÃO rodam — comportamento desejado (handoff em
+  // curso não envia mídia; e o gate is_human_active cobre handoffs anteriores).
   const AFTER_MODEL: ReadonlyArray<Hook> = [
     createTransferTriggerHook(client),
     formatWhatsapp,
+    createMediaSenderHook(client),
   ] as const;
 
   // BEFORE_SEND — ordem: human-delay PRIMEIRO, response-guard ÚLTIMO

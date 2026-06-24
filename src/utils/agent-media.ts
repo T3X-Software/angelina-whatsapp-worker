@@ -73,3 +73,58 @@ export function mapMediaRow(r: AgentMediaRow): AgentMediaEntry {
     mime_type: r.mime_type,
   };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Commit 2 (ADR 0003) — acumulação + gate do hook media-sender
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Mídia pronta para o hook `media-sender` enviar. */
+export interface MediaToSend {
+  id: string;
+  url: string;
+  caption?: string;
+  media_type: string;
+}
+
+/**
+ * Acumula as mídias escolhidas pelos tool calls `select_media` do turno em uma
+ * lista de envio (PURA). Deduplica por `id`. `caption` = título da mídia.
+ */
+export function collectPendingMedia(
+  toolResults: ReadonlyArray<{
+    name: string;
+    result: { success: boolean; data?: unknown };
+  }>,
+): MediaToSend[] {
+  const out: MediaToSend[] = [];
+  const seen = new Set<string>();
+  for (const tc of toolResults) {
+    if (tc.name !== 'select_media' || tc.result.success !== true) continue;
+    const data = tc.result.data as { media?: AgentMediaEntry[] } | undefined;
+    for (const m of data?.media ?? []) {
+      if (!m || !m.url || seen.has(m.id)) continue;
+      seen.add(m.id);
+      out.push({
+        id: m.id,
+        url: m.url,
+        caption: m.title ?? undefined,
+        media_type: m.media_type,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Gate do `media-sender` (PURA): NÃO envia mídia se o humano assumiu o
+ * atendimento — `leads.is_human_active=true` OU `contacts.ai_state` pausado
+ * (`PAUSED`/`HUMAN_TAKEOVER`). `AUTO` e `AFTER_HOURS_OK` permitem envio.
+ */
+export function canSendMedia(
+  isHumanActive: boolean | undefined,
+  aiState: string | undefined,
+): boolean {
+  if (isHumanActive === true) return false;
+  if (aiState === 'PAUSED' || aiState === 'HUMAN_TAKEOVER') return false;
+  return true;
+}

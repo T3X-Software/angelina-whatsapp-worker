@@ -271,6 +271,18 @@ export interface HarnessContext {
   handoffRequested?: boolean;
 
   /**
+   * Feature 1.9 (ADR 0003) — mídias escolhidas por `select_media` neste turno.
+   * O LOOP acumula (de `prevToolResults`) e o hook `media-sender` (AFTER_MODEL)
+   * envia, respeitando `is_human_active`/`ai_state`. Estruturalmente igual a
+   * `MediaToSend` de `utils/agent-media` (não importado aqui p/ desacoplar). */
+  pendingMedia?: Array<{
+    id: string;
+    url: string;
+    caption?: string;
+    media_type: string;
+  }>;
+
+  /**
    * Última tool_call do turno (Bloco 7). Usada pelo hook `transfer-trigger`
    * no ramo (b) — `classify_lead` com classification='HOT' + lead com 3 dados
    * obrigatórios também dispara handoff. Setado pelo loop após cada dispatch.

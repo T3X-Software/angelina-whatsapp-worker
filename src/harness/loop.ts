@@ -64,6 +64,7 @@ import {
   classifyInbound,
   transcriptionUsable,
 } from '../utils/transcribe';
+import { collectPendingMedia } from '../utils/agent-media';
 import { callClaude } from '../llm/anthropic';
 import {
   LLMUnavailableError,
@@ -1073,6 +1074,11 @@ export async function run(
         );
       }
     }
+
+    // [12.7] Feature 1.9 (ADR 0003) — acumula as mídias selecionadas por
+    // `select_media` neste turno em `ctx.pendingMedia`. O hook `media-sender`
+    // (AFTER_MODEL) envia, respeitando o gate is_human_active/ai_state.
+    ctx.pendingMedia = collectPendingMedia(prevToolResults);
 
     // [13] Hooks AFTER_MODEL.
     const afterModel = await runPhase('AFTER_MODEL', ctx);

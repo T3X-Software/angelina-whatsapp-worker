@@ -21,7 +21,8 @@
     "smoke:payload-audio": "tsx scripts/smoke-payload-audio.ts",
     "smoke:transcribe": "tsx scripts/smoke-transcribe.ts",
     "smoke:zapster-media": "tsx scripts/smoke-zapster-media.ts",
-    "smoke:select-media": "tsx scripts/smoke-select-media.ts"
+    "smoke:select-media": "tsx scripts/smoke-select-media.ts",
+    "smoke:media-sender": "tsx scripts/smoke-media-sender.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.92.0",
