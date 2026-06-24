@@ -27,7 +27,7 @@ interface HookResult {
 ```
 BEFORE_REQUEST: [rate-limit-guard, admin-router, load-context,
                  build-conversation-summary, after-hours-guard]
-AFTER_MODEL:    [transfer-trigger, format-whatsapp]
+AFTER_MODEL:    [transfer-trigger, format-whatsapp, media-sender]
 BEFORE_SEND:    [human-delay, response-guard]   ← response-guard sempre por último
 ```
 

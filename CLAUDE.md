@@ -14,7 +14,7 @@ Dentro de `BEFORE_REQUEST` (ordem):
   rate-limit-guard → admin-router → load-context → build-conversation-summary → after-hours-guard
 
 Dentro de `AFTER_MODEL` (ordem):
-  transfer-trigger → format-whatsapp
+  transfer-trigger → format-whatsapp → media-sender
 
 Dentro de `BEFORE_SEND` (ordem):
   human-delay → response-guard   ← response-guard SEMPRE é o último
