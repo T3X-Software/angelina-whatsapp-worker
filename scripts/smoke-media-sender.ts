@@ -56,19 +56,20 @@ eq(
   ['a'],
 );
 
-// ── canSendMedia ─────────────────────────────────────────────────────────────
+// ── canSendMedia (Opção A — espelha response-guard) ──────────────────────────
+// Assinatura: canSendMedia(aiState, isHumanActive, handoffAssumedAtSet).
 console.log('Feature 1.9 — canSendMedia');
-eq('AUTO + não humano → true', canSendMedia(false, 'AUTO'), true);
-eq('AFTER_HOURS_OK → true', canSendMedia(false, 'AFTER_HOURS_OK'), true);
-eq('isHumanActive → false', canSendMedia(true, 'AUTO'), false);
-eq('PAUSED → false', canSendMedia(false, 'PAUSED'), false);
-eq('HUMAN_TAKEOVER → false', canSendMedia(false, 'HUMAN_TAKEOVER'), false);
+eq('AUTO + free → true', canSendMedia('AUTO', false, false), true);
+eq('AFTER_HOURS_OK + free → true', canSendMedia('AFTER_HOURS_OK', false, false), true);
+eq('assistido (humano, NÃO assumido) → true', canSendMedia('AUTO', true, false), true);
+eq('handoff confirmado (humano + assumido) → false', canSendMedia('AUTO', true, true), false);
+eq('PAUSED → false', canSendMedia('PAUSED', false, false), false);
+eq('HUMAN_TAKEOVER → false', canSendMedia('HUMAN_TAKEOVER', false, false), false);
 
 // ── hook media-sender (mock client) ──────────────────────────────────────────
 function fakeCtx(opts: {
   media: Array<{ id: string; url: string; caption?: string; media_type: string }>;
-  isHumanActive?: boolean;
-  aiState?: string;
+  state?: { aiState?: string; isHumanActive?: boolean; assumedAtSet?: boolean };
 }) {
   const sends: unknown[] = [];
   const events: string[] = [];
@@ -80,36 +81,50 @@ function fakeCtx(opts: {
   } as unknown as ZapsterClient;
   const ctx = {
     pendingMedia: opts.media,
-    lead: { id: 'l', isHumanActive: opts.isHumanActive ?? false },
-    contact: { id: 'c', phone: '5519', name: 'x', aiState: opts.aiState ?? 'AUTO' },
+    lead: { id: 'l', isHumanActive: false },
+    contact: { id: 'c', phone: '5519', name: 'x', aiState: 'AUTO' },
     payload: { data: { sender: { id: '5519997124472' }, recipient: { type: 'chat' } } },
     eventBus: { emit: (t: string) => events.push(t) },
   } as unknown as HarnessContext;
-  return { ctx, sends, events, client };
+  // Injeta o estado de gating — substitui o `loadMediaGateState` real (que iria
+  // ao banco). Estrutura = MediaGateState.
+  const loadState = async () => ({
+    aiState: opts.state?.aiState ?? 'AUTO',
+    isHumanActive: opts.state?.isHumanActive ?? false,
+    assumedAtSet: opts.state?.assumedAtSet ?? false,
+  });
+  return { ctx, sends, events, client, loadState };
 }
 
 console.log('Feature 1.9 — hook media-sender');
 async function run(): Promise<void> {
   {
     const f = fakeCtx({ media: [{ id: 'a', url: 'https://x/a.jpg', media_type: 'image' }, { id: 'b', url: 'https://x/b.jpg', caption: 'cardápio', media_type: 'document' }] });
-    await createMediaSenderHook(f.client).run(f.ctx);
+    await createMediaSenderHook(f.client, f.loadState).run(f.ctx);
     eq('AUTO → envia 2 mídias', f.sends.length, 2);
     eq('emit media_sent + complete', f.events.includes('media_sender_complete'), true);
   }
   {
-    const f = fakeCtx({ media: [{ id: 'a', url: 'https://x/a.jpg', media_type: 'image' }], isHumanActive: true });
-    await createMediaSenderHook(f.client).run(f.ctx);
-    eq('isHumanActive → 0 envios', f.sends.length, 0);
+    // Opção A: modo assistido (humano, handoff NÃO assumido) agora LIBERA.
+    const f = fakeCtx({ media: [{ id: 'a', url: 'https://x/a.jpg', media_type: 'image' }], state: { isHumanActive: true, assumedAtSet: false } });
+    await createMediaSenderHook(f.client, f.loadState).run(f.ctx);
+    eq('assistido → envia (Opção A)', f.sends.length, 1);
+  }
+  {
+    // Handoff confirmado (humano assumiu) → bloqueia.
+    const f = fakeCtx({ media: [{ id: 'a', url: 'https://x/a.jpg', media_type: 'image' }], state: { isHumanActive: true, assumedAtSet: true } });
+    await createMediaSenderHook(f.client, f.loadState).run(f.ctx);
+    eq('handoff confirmado → 0 envios', f.sends.length, 0);
     eq('emit media_send_skipped', f.events.includes('media_send_skipped'), true);
   }
   {
-    const f = fakeCtx({ media: [{ id: 'a', url: 'https://x/a.jpg', media_type: 'image' }], aiState: 'PAUSED' });
-    await createMediaSenderHook(f.client).run(f.ctx);
+    const f = fakeCtx({ media: [{ id: 'a', url: 'https://x/a.jpg', media_type: 'image' }], state: { aiState: 'PAUSED' } });
+    await createMediaSenderHook(f.client, f.loadState).run(f.ctx);
     eq('PAUSED → 0 envios', f.sends.length, 0);
   }
   {
     const f = fakeCtx({ media: [] });
-    await createMediaSenderHook(f.client).run(f.ctx);
+    await createMediaSenderHook(f.client, f.loadState).run(f.ctx);
     eq('sem mídia → 0 envios, sem eventos', f.sends.length + f.events.length, 0);
   }
 

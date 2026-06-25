@@ -18,6 +18,9 @@
 // resposta (que sai depois, no BEFORE_SEND). Aceito no v1; reavaliar se a UX
 // pedir texto-antes-de-mídia (exigiria um passo pós-send, fora das 3 fases).
 
+import { sql } from 'drizzle-orm';
+
+import { db } from '../db/client';
 import type { Hook, HookResult, HarnessContext } from '../harness/types';
 import type { ZapsterClient } from '../zapster/client';
 import { canSendMedia } from '../utils/agent-media';
@@ -27,7 +30,51 @@ function redactPhone(p: string): string {
   return p.length <= 6 ? '***' : `${p.slice(0, 4)}***${p.slice(-2)}`;
 }
 
-export function createMediaSenderHook(client: ZapsterClient): Hook {
+/** Estado real de gating (ai_state + handoff) lido do banco. */
+export interface MediaGateState {
+  aiState: string;
+  isHumanActive: boolean;
+  assumedAtSet: boolean;
+}
+
+/**
+ * Lê o estado REAL de gating (1 round-trip), espelhando o `response-guard`.
+ * Necessário porque `ctx.contact.aiState` é stub ('AUTO') e `ctx.lead` não
+ * carrega `handoff_assumed_at` — confiar no ctx daria gate incorreto.
+ */
+export async function loadMediaGateState(
+  contactId: string,
+  leadId: string | null,
+): Promise<MediaGateState> {
+  const rows = await db.execute<{
+    ai_state: string;
+    is_human_active: boolean | null;
+    handoff_assumed_at: Date | string | null;
+    [key: string]: unknown;
+  }>(sql`
+    SELECT c.ai_state                          AS ai_state,
+           COALESCE(l.is_human_active, false)  AS is_human_active,
+           l.handoff_assumed_at                AS handoff_assumed_at
+      FROM contacts c
+      LEFT JOIN leads l ON l.id = ${leadId}
+     WHERE c.id = ${contactId}
+     LIMIT 1
+  `);
+  const row = Array.from(rows)[0];
+  return {
+    aiState: row?.ai_state ?? 'AUTO',
+    isHumanActive: row?.is_human_active === true,
+    assumedAtSet: row?.handoff_assumed_at != null,
+  };
+}
+
+export function createMediaSenderHook(
+  client: ZapsterClient,
+  loadState: (
+    contactId: string,
+    leadId: string | null,
+  ) => Promise<MediaGateState> = loadMediaGateState,
+): Hook {
   return {
     name: 'media-sender',
     phase: 'AFTER_MODEL',
@@ -36,15 +83,19 @@ export function createMediaSenderHook(client: ZapsterClient): Hook {
       const media = ctx.pendingMedia ?? [];
       if (media.length === 0) return {};
 
-      // Gate: humano assumiu → não empurra mídia.
-      if (!canSendMedia(ctx.lead?.isHumanActive, ctx.contact.aiState)) {
+      // Gate (Opção A): re-lê o estado real e aplica a MESMA precedência do
+      // response-guard — bloqueia em PAUSED/HUMAN_TAKEOVER ou handoff confirmado;
+      // libera no modo assistido (consistente com o passthrough do texto).
+      const state = await loadState(ctx.contact.id, ctx.lead?.id ?? null);
+      if (!canSendMedia(state.aiState, state.isHumanActive, state.assumedAtSet)) {
         ctx.eventBus.emit(
           'media_send_skipped',
           {
             reason: 'human_active_or_paused',
             count: media.length,
-            ai_state: ctx.contact.aiState,
-            is_human_active: ctx.lead?.isHumanActive ?? null,
+            ai_state: state.aiState,
+            is_human_active: state.isHumanActive,
+            handoff_assumed_at_set: state.assumedAtSet,
           },
           'info',
         );

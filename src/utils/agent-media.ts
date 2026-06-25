@@ -116,15 +116,26 @@ export function collectPendingMedia(
 }
 
 /**
- * Gate do `media-sender` (PURA): NÃO envia mídia se o humano assumiu o
- * atendimento — `leads.is_human_active=true` OU `contacts.ai_state` pausado
- * (`PAUSED`/`HUMAN_TAKEOVER`). `AUTO` e `AFTER_HOURS_OK` permitem envio.
+ * Gate do `media-sender` (PURA). Opção A (2026-06-25): espelha a precedência de
+ * BLOQUEIO do `response-guard` (regras 1, 2, 3a) para que a mídia siga a MESMA
+ * política do texto — se a IA pode falar, pode enviar a mídia que prometeu.
+ *
+ * Bloqueia quando:
+ *   - `contacts.ai_state` ∈ {PAUSED, HUMAN_TAKEOVER} (regras 1 e 2), OU
+ *   - handoff CONFIRMADO: `is_human_active=true` E `handoff_assumed_at NOT NULL`
+ *     (regra 3a).
+ * LIBERA no modo assistido transitório (`is_human_active=true` E
+ * `handoff_assumed_at IS NULL`, regra 3b) — antes a mídia era barrada aqui
+ * mesmo com o texto liberado (inconsistência corrigida).
+ *
+ * `AUTO`/`AFTER_HOURS_OK` + (free|assisted) → libera.
  */
 export function canSendMedia(
-  isHumanActive: boolean | undefined,
   aiState: string | undefined,
+  isHumanActive: boolean | undefined,
+  handoffAssumedAtSet: boolean | undefined,
 ): boolean {
-  if (isHumanActive === true) return false;
   if (aiState === 'PAUSED' || aiState === 'HUMAN_TAKEOVER') return false;
+  if (isHumanActive === true && handoffAssumedAtSet === true) return false;
   return true;
 }
