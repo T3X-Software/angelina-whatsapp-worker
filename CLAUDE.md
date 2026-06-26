@@ -59,5 +59,24 @@ Tudo vive em `agent_configs` (cache 30s). Usar `config/agent-configs.ts`.
 - `config/` — leitura de `agent_configs` com cache
 - `zapster/` — cliente Zapster API
 
+## Deploy (VPS — PM2)
+Produção roda sob **PM2** como `angelina-worker`, executando `node dist/main.js`.
+`dist/` é **gitignored** → `git pull` NÃO atualiza o compilado; o build TEM que rodar no VPS.
+
+```bash
+git pull origin main
+npm ci
+npm run build && echo "BUILD OK"          # CRÍTICO — regenera dist/ (gitignored)
+pm2 reload angelina-worker --update-env   # ✅ reload = graceful, sem downtime
+```
+
+- **Use `pm2 reload`, NÃO `pm2 restart`.** `restart` mata e sobe o processo (≈1–2min de
+  janela em que o edge Fastify fica fora → webhooks da Zapster que chegam nesse intervalo
+  se perdem). `reload` é graceful (validado 2026-06-25).
+- Se pular o `npm run build`, o PM2 segue servindo o `dist/` antigo (sintoma: features novas
+  não aparecem / warning de "unknown tool names"). Confirme: `grep -c <símboloNovo> dist/...js`.
+- Health check: `GET /healthz` → `{ ok: true }` (`edge/server.ts`). É **liveness rasa** — não
+  verifica DB/Redis/BullMQ. Aprofundar para readiness é melhoria em aberto.
+
 ## Adicionar novo bloco
 Ver `../Monorepo-Structure.md` seção do bloco correspondente para localização e convenções.
