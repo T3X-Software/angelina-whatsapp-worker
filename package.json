@@ -23,7 +23,8 @@
     "smoke:zapster-media": "tsx scripts/smoke-zapster-media.ts",
     "smoke:select-media": "tsx scripts/smoke-select-media.ts",
     "smoke:media-sender": "tsx scripts/smoke-media-sender.ts",
-    "smoke:healthz": "tsx scripts/smoke-healthz.ts"
+    "smoke:healthz": "tsx scripts/smoke-healthz.ts",
+    "smoke:transcription-persist": "tsx scripts/smoke-transcription-persist.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.92.0",

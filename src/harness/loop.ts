@@ -741,6 +741,22 @@ export async function run(
             },
             'info',
           );
+          // [M1] Persiste a transcrição na row inbound (id=messageId, já inserida
+          // pela idempotency) para o L1 surfar o conteúdo do áudio em turnos
+          // FUTUROS (sem isso, a mensagem de áudio aparece vazia no histórico).
+          // Falha aqui não aborta o turno — a transcrição já está em ctx.message.text.
+          try {
+            await db.execute(sql`
+              UPDATE messages SET transcription = ${ctx.message.text}
+               WHERE id = ${messageId}
+            `);
+          } catch (err) {
+            bus.emit(
+              'audio_transcription_persist_failed',
+              { error: err instanceof Error ? err.message : String(err) },
+              'med',
+            );
+          }
         } else {
           bus.emit(
             'audio_transcribe_failed',

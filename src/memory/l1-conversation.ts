@@ -42,11 +42,14 @@ import type {
  * ela depois (a ordem já está garantida pela query); deixamos tipada para
  * documentar o shape.
  */
-interface RawMessageRow {
+export interface RawMessageRow {
   id: string;
   direction: string;
   role: string;
   text: string | null;
+  /** Transcrição do áudio (Feature 1.8/M1). Usada como conteúdo do turno `user`
+   *  quando `text` é NULL (mensagem de áudio do cliente). */
+  transcription: string | null;
   tool_name: string | null;
   tool_args: unknown;
   tool_result: unknown;
@@ -74,6 +77,7 @@ export async function loadLastN(
            direction::text           AS direction,
            role::text                AS role,
            text,
+           transcription,
            tool_name,
            tool_args,
            tool_result,
@@ -113,12 +117,13 @@ export async function loadLastN(
  * Aplica o mapeamento role→LLMMessage. Retorna `null` se a linha não tem
  * conteúdo útil (ex: assistant sem text e sem tool_name).
  */
-function mapRowToLLMMessage(row: RawMessageRow): LLMMessage | null {
+export function mapRowToLLMMessage(row: RawMessageRow): LLMMessage | null {
   switch (row.role) {
     case 'user': {
-      // Inbound do cliente (texto). Se text NULL/vazio, pula
-      // (áudio sem transcrição não vai como turno de conversa para o LLM).
-      const text = (row.text ?? '').trim();
+      // Inbound do cliente: texto direto OU transcrição do áudio (M1 — áudio
+      // transcrito persiste em `messages.transcription`). Se ambos vazios, pula
+      // (áudio sem transcrição não vira turno de conversa para o LLM).
+      const text = (row.text ?? row.transcription ?? '').trim();
       if (text.length === 0) return null;
       return { role: 'user', content: text };
     }
