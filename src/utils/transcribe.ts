@@ -10,6 +10,8 @@
 // A lógica de DECISÃO (classifyInbound) e de USO (transcriptionUsable) é pura e
 // testável; só `transcribeAudio` faz IO.
 
+import { env } from '../env';
+
 const OPENAI_TRANSCRIBE_URL = 'https://api.openai.com/v1/audio/transcriptions';
 const WHISPER_MODEL = 'whisper-1';
 const MAX_BYTES = 25 * 1024 * 1024; // limite do Whisper: 25MB
@@ -63,7 +65,7 @@ export async function transcribeAudio(
   audioUrl: string,
   mimeHint?: string,
 ): Promise<TranscribeResult> {
-  const apiKey = process.env['OPENAI_API_KEY'];
+  const apiKey = env.OPENAI_API_KEY;
   if (!apiKey) return { ok: false, error: 'OPENAI_API_KEY ausente' };
 
   // 1. Download do áudio.

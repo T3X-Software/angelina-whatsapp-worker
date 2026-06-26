@@ -22,6 +22,11 @@ const EnvSchema = z.object({
   // Anthropic — chave do Claude (modelo principal da Angelina).
   ANTHROPIC_API_KEY: z.string().min(1, 'ANTHROPIC_API_KEY é obrigatório'),
 
+  // OpenAI — embeddings (RAG L4) + Whisper (transcrição de áudio 1.8) + fallback
+  // LLM (GPT-4o). OPCIONAL: ausência NÃO derruba o boot (essas features degradam
+  // graciosamente), mas o loader emite WARNING claro no boot — evita falha silenciosa.
+  OPENAI_API_KEY: z.string().min(1).optional(),
+
   // Zapster — gateway WhatsApp (não é Meta Cloud API).
   ZAPSTER_API_URL: z.string().url('ZAPSTER_API_URL deve ser uma URL válida'),
   ZAPSTER_API_KEY: z.string().min(1, 'ZAPSTER_API_KEY é obrigatório'),
@@ -72,6 +77,15 @@ function loadEnv(): Env {
         'Verifique o .env (dev) ou o .env.production (VPS) e tente novamente.',
     );
     throw new Error('Invalid environment configuration');
+  }
+
+  if (!parsed.data.OPENAI_API_KEY) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[env.ts] OPENAI_API_KEY ausente — RAG (embeddings), transcrição de áudio ' +
+        '(Whisper) e fallback LLM (GPT-4o) ficarão indisponíveis. Configure no .env ' +
+        '(dev) ou .env.production (VPS) se precisar dessas features.',
+    );
   }
 
   return parsed.data;

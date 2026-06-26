@@ -28,6 +28,7 @@
 //   - response-guard ainda é último step antes de send (#1) — não tocado aqui.
 
 import OpenAI from 'openai';
+import { env } from '../env';
 
 import type { EventBus } from '../harness/types';
 
@@ -101,16 +102,13 @@ let _clientTimeoutMs: number | null = null;
  * — necessário para smokes que sobrescrevem env on-the-fly (mesmo trick do
  * `llm/anthropic.ts`).
  *
- * Lê `process.env.OPENAI_API_KEY` direto (sem passar pelo `env.ts` Zod
- * schema) porque:
- *   1. `env.ts` é fail-fast — se a key estivesse `required` lá, a ausência
- *      no boot derrubaria o worker mesmo quando RAG está desligado.
- *   2. RAG é feature-flagged via `agent_configs.hook_params.rag` — pode não
- *      estar ativo em todos os ambientes ainda.
- * Decisão: validar a key DENTRO do helper, não no boot.
+ * Lê `env.OPENAI_API_KEY` (validado no `env.ts` como OPCIONAL — a ausência NÃO
+ * derruba o boot, só emite warning; RAG é feature-flagged via
+ * `agent_configs.hook_params.rag`). Mantemos o guard de ausência DENTRO do
+ * helper (throw) para o caso de a feature ser usada sem a key configurada.
  */
 function getClient(timeoutMs: number): OpenAI {
-  const apiKey = process.env['OPENAI_API_KEY'];
+  const apiKey = env.OPENAI_API_KEY;
   if (!apiKey || apiKey.length === 0) {
     throw new Error(
       '[openai-embedding] OPENAI_API_KEY ausente do ambiente. ' +
