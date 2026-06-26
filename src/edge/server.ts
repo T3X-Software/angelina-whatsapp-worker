@@ -12,6 +12,69 @@
 import Fastify, { FastifyInstance } from 'fastify';
 import formbody from '@fastify/formbody';
 import type { Logger } from 'pino';
+import { sql } from 'drizzle-orm';
+
+import { db } from '../db/client';
+import { getRedis } from '../queue/connection';
+
+/** Timeout por check do /healthz — evita o endpoint pendurar numa conexão morta. */
+const HEALTHZ_TIMEOUT_MS = 2000;
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('timeout')), ms);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e: unknown) => {
+        clearTimeout(timer);
+        reject(e instanceof Error ? e : new Error(String(e)));
+      },
+    );
+  });
+}
+
+/** Dependências do readiness check — injetáveis para teste (sem tocar infra). */
+export interface ReadinessDeps {
+  pingRedis: () => Promise<unknown>;
+  pingDb: () => Promise<unknown>;
+}
+
+const defaultReadinessDeps: ReadinessDeps = {
+  pingRedis: () => withTimeout(getRedis().ping(), HEALTHZ_TIMEOUT_MS),
+  pingDb: () => withTimeout(db.execute(sql`SELECT 1`), HEALTHZ_TIMEOUT_MS),
+};
+
+export interface ReadinessResult {
+  ok: boolean;
+  checks: { server: boolean; redis: boolean; database: boolean };
+}
+
+/**
+ * Readiness check do worker: server (Fastify up) + Redis (PING) + DB (SELECT 1).
+ * NUNCA throwa — cada dependência falha isolada vira `false`; `ok` é o AND delas.
+ * Deps injetáveis para o smoke. Usado pelo `GET /healthz` (200 se `ok`, senão 503).
+ */
+export async function checkReadiness(
+  deps: ReadinessDeps = defaultReadinessDeps,
+): Promise<ReadinessResult> {
+  const checks = { server: true, redis: false, database: false };
+  try {
+    await deps.pingRedis();
+    checks.redis = true;
+  } catch {
+    checks.redis = false;
+  }
+  try {
+    await deps.pingDb();
+    checks.database = true;
+  } catch {
+    checks.database = false;
+  }
+  return { ok: checks.redis && checks.database, checks };
+}
 
 /**
  * Cria uma instância Fastify pronta para uso, com:
@@ -20,7 +83,7 @@ import type { Logger } from 'pino';
  *   - logger interno do Fastify desligado (usamos pino próprio)
  *   - `@fastify/formbody` registrado (Zapster pode mandar
  *      `application/x-www-form-urlencoded` ou `application/json`)
- *   - `GET /healthz` retornando `{ ok: true }`
+ *   - `GET /healthz` — readiness check (200 se DB+Redis OK, 503 caso contrário)
  *
  * As rotas de webhook são registradas separadamente — esta função NÃO conhece
  * o handler da Zapster.
@@ -46,7 +109,16 @@ export async function createServer(logger: Logger): Promise<FastifyInstance> {
 
   await app.register(formbody);
 
-  app.get('/healthz', async () => ({ ok: true }));
+  // Readiness check — verifica DB + Redis (não só liveness). 503 se algo falhar,
+  // para o monitoramento/deploy detectarem instância indisponível.
+  app.get('/healthz', async (_request, reply) => {
+    const result = await checkReadiness();
+    return reply.code(result.ok ? 200 : 503).send({
+      ok: result.ok,
+      checks: result.checks,
+      timestamp: new Date().toISOString(),
+    });
+  });
 
   // Hook genérico de log de request finalizada (debug-level — visível só com LOG_LEVEL=debug).
   // Útil para auditar latência durante o smoke do Bloco 2 sem poluir prod.
