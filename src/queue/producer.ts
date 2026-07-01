@@ -127,6 +127,27 @@ export async function enqueueInbound(
   const phone = payload.data.sender.id;
   const zapsterMessageId =
     headers['x-message-id'] ?? payload.data.message.id ?? '(missing)';
+
+  // ── Filtro de grupo ────────────────────────────────────────────────────
+  // A Angelina é um agente 1:1 de vendas — mensagens de GRUPOS onde o número
+  // participa NÃO são turnos de cliente. Sem este guard, o worker usa
+  // `sender.id` (quem digitou no grupo) como se fosse a conversa direta do
+  // lead, poluindo o CRM, gastando LLM e tentando responder no grupo (falha).
+  // Identificamos pelo `recipient.type === 'group'` (recipient.id é o JID do
+  // grupo, ex.: 120363...). Descartamos ANTES de bucketizar/enfileirar.
+  if (payload.data.recipient.type === 'group') {
+    logger.info(
+      {
+        event: 'group_message_ignored',
+        sender: phone,
+        group_id: payload.data.recipient.id,
+        zapster_message_id: zapsterMessageId,
+        message_type: payload.data.message.type,
+      },
+      `Ignorando mensagem de grupo group_id=${payload.data.recipient.id}`,
+    );
+    return;
+  }
   // jobId atrelado ao zapster_message_id: idempotência automática contra
   // retransmits + nunca colide com jobs anteriores do mesmo contato.
   const jobId = `lua-msg-${zapsterMessageId}`;
