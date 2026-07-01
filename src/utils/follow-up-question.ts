@@ -216,10 +216,46 @@ export interface LeadStateForCategoryDetection {
 }
 
 /**
+ * Retorna `true` se a categoria se refere a uma dimensão do lead que JÁ está
+ * preenchida (não-nula) — ou seja, uma dimensão que NÃO deve ser perguntada
+ * novamente no follow-up.
+ *
+ * `generico` nunca é "dimensão". `orcamento` não tem coluna em `leads`
+ * (confirmado no Bloco 1), então não temos como saber se está preenchida —
+ * tratamos como NÃO-preenchida (permitida via regex).
+ *
+ * Função pura.
+ */
+function isDimensaoJaPreenchida(
+  categoria: FollowUpCategoria,
+  lead: LeadStateForCategoryDetection,
+): boolean {
+  switch (categoria) {
+    case 'tipo_evento':
+      return lead.eventType != null;
+    case 'data':
+      return lead.eventDate != null;
+    case 'convidados':
+      return lead.guestCount != null;
+    default:
+      // 'orcamento' | 'generico'
+      return false;
+  }
+}
+
+/**
  * Pipeline COMPLETO de detecção de categoria (D11'). Retorna a categoria
  * escolhida + `perguntaExtraida` quando aplicável (apenas em `generico`).
  *
  * Lê 1 row do banco (última msg OUTBOUND) — sem chamada ao LLM.
+ *
+ * **Guard (opção a) — estado do lead manda.** A regex sobre a última OUTBOUND
+ * casa com qualquer MENÇÃO da palavra-chave — inclusive quando a Angelina
+ * apenas CONFIRMA o dado ("Já registrei: casamento em 18/07" casa
+ * REGEX_TIPO_EVENTO mesmo com event_type já salvo). Sem guard, isso reperguntava
+ * uma dimensão já conhecida. Agora a regex só vale se apontar para uma dimensão
+ * AINDA faltante no lead; caso contrário caímos no fallback por estado (primeira
+ * dimensão faltante → generico se nada falta).
  *
  * @param contactId UUID do contato.
  * @param lead snapshot mínimo do lead (3 campos NULL-checkable).
@@ -230,15 +266,15 @@ export async function detectarCategoria(
 ): Promise<{ categoria: FollowUpCategoria; perguntaExtraida?: string }> {
   const textoOutbound = await extrairUltimaPerguntaOutbound(contactId);
 
-  // Etapa 2 — regex.
+  // Etapa 2 — regex, MAS só vale se a dimensão ainda estiver faltante no lead.
   const porRegex = detectarCategoriaPorRegex(textoOutbound);
-  if (porRegex !== null) {
+  if (porRegex !== null && !isDimensaoJaPreenchida(porRegex, lead)) {
     return porRegex === 'generico'
       ? { categoria: 'generico', perguntaExtraida: extrairUltimaPergunta(textoOutbound) }
       : { categoria: porRegex };
   }
 
-  // Etapa 3 — fallback por estado do lead.
+  // Etapa 3 — fallback por estado do lead (primeira dimensão faltante).
   if (lead.eventType == null) return { categoria: 'tipo_evento' };
   if (lead.eventDate == null) return { categoria: 'data' };
   if (lead.guestCount == null) return { categoria: 'convidados' };
