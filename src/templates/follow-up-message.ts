@@ -34,6 +34,12 @@ export interface RenderFollowUpMessageInput {
   perguntaExtraida?: string;
   /** 5 templates literais lidos de `hook_params.follow_up.templates`. */
   templates: FollowUpTemplates;
+  /** Metadados conhecidos do lead — interpolados em `{{evento}}`, `{{data}}`, `{{convidados}}` no template generico. */
+  leadInfo?: {
+    evento?: string;
+    data?: string | null;
+    convidados?: string;
+  };
 }
 
 /**
@@ -76,6 +82,9 @@ export function renderFollowUpMessage(input: RenderFollowUpMessageInput): string
   if (categoria === 'generico') {
     const interpolado = interpolateTemplate(templates.generico, {
       pergunta_extraida: perguntaExtraida ?? '',
+      evento: input.leadInfo?.evento ?? null,
+      data: input.leadInfo?.data ?? null,
+      convidados: input.leadInfo?.convidados ?? null,
     });
     return prefixo + interpolado;
   }

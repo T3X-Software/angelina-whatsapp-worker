@@ -309,6 +309,11 @@ export async function runFollowUpChecker(
           categoria,
           perguntaExtraida,
           templates: config.templates,
+          leadInfo: {
+            evento: row.event_type != null ? humanizeEventType(row.event_type) : undefined,
+            data: row.event_date ?? null,
+            convidados: row.guest_count != null ? String(row.guest_count) : undefined,
+          },
         });
 
         // 6d. Send via Zapster.
